@@ -1,0 +1,550 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>PyFlexiTac 项目分析与功能详解</title>
+<style>* { box-sizing: border-box; margin: 0; padding: 0; }
+body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; line-height: 1.7; color: #24292e; background: #fff; max-width: 800px; margin: 0 auto; padding: 16px; font-size: 16px; }
+h1 { font-size: 1.8em; border-bottom: 2px solid #e1e4e8; padding-bottom: 0.3em; margin: 24px 0 16px; }
+h2 { font-size: 1.45em; border-bottom: 1px solid #e1e4e8; padding-bottom: 0.3em; margin: 24px 0 16px; }
+h3 { font-size: 1.25em; margin: 24px 0 16px; }
+h4 { font-size: 1.1em; margin: 24px 0 16px; }
+p { margin: 0 0 16px; }
+a { color: #0366d6; text-decoration: none; }
+a:hover { text-decoration: underline; }
+code { background: #f6f8fa; padding: 2px 6px; border-radius: 4px; font-family: 'SF Mono', 'Fira Code', monospace; font-size: 0.9em; }
+pre { background: #f6f8fa; padding: 16px; border-radius: 6px; overflow-x: auto; margin: 0 0 16px; line-height: 1.45; }
+pre code { background: none; padding: 0; }
+blockquote { border-left: 4px solid #dfe2e5; padding: 0 16px; color: #6a737d; margin: 0 0 16px; }
+table { border-collapse: collapse; width: 100%; margin: 0 0 16px; }
+th, td { border: 1px solid #dfe2e5; padding: 8px 12px; text-align: left; }
+th { background: #f6f8fa; font-weight: 600; }
+tr:nth-child(even) { background: #f6f8fa; }
+ul, ol { padding-left: 2em; margin: 0 0 16px; }
+li { margin: 4px 0; }
+img { max-width: 100%; }
+hr { border: none; border-top: 1px solid #e1e4e8; margin: 24px 0; }
+strong { font-weight: 600; }
+.index-list { list-style: none; padding: 0; }
+.index-list li { margin: 12px 0; padding: 12px 16px; background: #f6f8fa; border-radius: 8px; }
+.index-list a { font-size: 1.1em; font-weight: 500; }
+.back-link { display: inline-block; margin-bottom: 16px; color: #586069; font-size: 0.9em; }</style>
+</head>
+<body>
+<a class="back-link" href="index.html">← 返回索引</a>
+<h1 id="pyflexitac-项目分析与功能详解">PyFlexiTac 项目分析与功能详解</h1>
+
+<hr>
+
+<h2 id="一项目概述">一、项目概述</h2>
+
+<p><strong>PyFlexiTac</strong> 是一个用于 <a href="https://flexitac.github.io/">FlexiTac</a> 触觉传感器的 Python 接口库。它提供了从 Arduino 固件烧录到传感器数据读取的完整工具链。项目版本为 <strong>0.3.1</strong>，基于 Python 3.11+，采用 MIT 协议开源。</p>
+
+<p><strong>核心依赖</strong>：<code>numpy</code>（数值计算）+ <code>pyserial</code>（串口通信） <strong>可选依赖</strong>：<code>matplotlib</code>（实时热力图可视化）</p>
+
+<hr>
+
+<h2 id="二项目目录结构与组成">二、项目目录结构与组成</h2>
+
+<pre><code>PyFlexiTac/
+├── flexitac/                    # 核心包
+│   ├── __init__.py              # 公开接口：FlexiTacSensor, FlexiTacFrame
+│   ├── sensor.py                # 传感器串口读取与帧解析核心
+│   ├── find_port.py             # flexitac-find-port CLI：通过拔插识别传感器端口
+│   ├── flash.py                 # flexitac-flash CLI：渲染并烧录 Arduino 固件
+│   ├── logging_utils.py         # 日志配置工具
+│   ├── py.typed                 # PEP 561 类型标记文件
+│   └── firmware/
+│       ├── __init__.py
+│       └── template.ino         # Arduino 固件模板（C++）
+├── examples/                    # 示例脚本 / CLI 入口
+│   ├── __init__.py
+│   ├── stream_frames.py         # flexitac-stream CLI：流式打印帧数据统计
+│   └── visualize_heatmap.py     # flexitac-heatmap CLI：实时 matplotlib 热力图
+├── tests/                       # 单元测试
+│   ├── conftest.py              # pytest 配置
+│   ├── test_sensor.py           # 传感器帧解析与归一化测试
+│   ├── test_find_port.py        # 端口查找测试
+│   └── test_flash.py            # 固件渲染与板检测测试
+├── .github/workflows/           # CI/CD
+│   ├── test.yml
+│   └── publish.yml
+├── pyproject.toml               # 项目元数据、依赖、工具配置、入口点
+├── Makefile                     # 开发辅助（格式化、静态检查、测试）
+├── README.md                    # 使用文档
+├── LICENSE                      # MIT
+└── CITATION.cff                 # 引用信息</code></pre>
+
+<h3 id="21-核心模块详解">2.1 核心模块详解</h3>
+
+<table><thead><tr>
+<th style="text-align:left">模块</th>
+<th style="text-align:left">文件</th>
+<th style="text-align:left">类/函数</th>
+<th style="text-align:left">职责</th>
+</tr></thead><tbody>
+<tr>
+<td style="text-align:left"><strong>传感器抽象</strong></td>
+<td style="text-align:left"><a href="flexitac/sensor.py">sensor.py</a></td>
+<td style="text-align:left"><code>FlexiTacSensor</code>, <code>FlexiTacFrame</code></td>
+<td style="text-align:left">串口通信、帧同步解析、基线校准、信号归一化</td>
+</tr>
+<tr>
+<td style="text-align:left"><strong>端口查找</strong></td>
+<td style="text-align:left"><a href="flexitac/find<em>port.py">find</em>port.py</a></td>
+<td style="text-align:left"><code>find_port()</code></td>
+<td style="text-align:left">通过拔插传感器物理交互识别串口设备路径</td>
+</tr>
+<tr>
+<td style="text-align:left"><strong>固件烧录</strong></td>
+<td style="text-align:left"><a href="flexitac/flash.py">flash.py</a></td>
+<td style="text-align:left"><code>flash()</code>, <code>render<em>template()</code>, <code>detect</em>board()</code></td>
+<td style="text-align:left">从 <code>.ino</code> 模板渲染参数化固件，调用 arduino-cli 编译并烧录</td>
+</tr>
+<tr>
+<td style="text-align:left"><strong>固件模板</strong></td>
+<td style="text-align:left"><a href="flexitac/firmware/template.ino">template.ino</a></td>
+<td style="text-align:left">Arduino 固件</td>
+<td style="text-align:left">循环读取 ADC → 串口输出带 <code>0xAA 0x55</code> 帧标记的 uint8 字节流</td>
+</tr>
+<tr>
+<td style="text-align:left"><strong>示例：流打印</strong></td>
+<td style="text-align:left"><a href="examples/stream<em>frames.py">stream</em>frames.py</a></td>
+<td style="text-align:left"><code>main()</code></td>
+<td style="text-align:left">逐帧打印 FPS、raw<em>max、norm</em>max 统计</td>
+</tr>
+<tr>
+<td style="text-align:left"><strong>示例：热力图</strong></td>
+<td style="text-align:left"><a href="examples/visualize<em>heatmap.py">visualize</em>heatmap.py</a></td>
+<td style="text-align:left"><code>main()</code></td>
+<td style="text-align:left">实时 matplotlib 热力图可视化</td>
+</tr>
+</tbody></table>
+
+<hr>
+
+<h2 id="三四大-cli-功能详解">三、四大 CLI 功能详解</h2>
+
+<h3 id="31-flexitac-find-port-查找传感器端口">3.1 <code>flexitac-find-port</code> —— 查找传感器端口</h3>
+
+<p><strong>对应的源码文件</strong>：<a href="flexitac/find<em>port.py">find</em>port.py</a></p>
+
+<h4 id="它在干什么">它在干什么？</h4>
+
+<p>这是一个<strong>交互式端口发现工具</strong>。当用户不确定传感器连接在哪个 <code>/dev/tty*</code> 设备上时，运行此命令即可找出正确的端口。</p>
+
+<h4 id="工作原理三步法">工作原理（三步法）：</h4>
+
+<ol>
+<li><strong>快照前</strong>：调用 <code>list<em>serial</em>ports()</code> 枚举当前系统中所有可用的串口设备（Linux 下扫描 <code>/dev/tty*</code>，Windows 下使用 <code>serial.tools.list_ports.comports()</code>）。</li>
+<li><strong>等待拔插</strong>：通过 <code>input()</code> 提示用户拔掉 FlexiTac 的 USB 线缆，然后按回车继续。</li>
+<li><strong>快照后</strong>：再次枚举串口，计算 <code>before - after</code> 的差集 —— 消失的那个端口就是传感器所在的端口。</li>
+</ol>
+
+<h4 id="关键实现细节">关键实现细节：</h4>
+
+<pre><code>def find_port(*, settle_s: float = 0.5) -&gt; str:
+    before = list_serial_ports()                          # 拔之前有哪些端口
+    input(&quot;Unplug the FlexiTac USB cable, then press Enter... &quot;)
+    time.sleep(settle_s)                                  # 等 0.5s 让系统稳定
+    after = list_serial_ports()                           # 拔之后有哪些端口
+    diff = sorted(before - after)                         # 差集 = 消失的端口</code></pre>
+
+<h4 id="异常处理">异常处理：</h4>
+
+<table><thead><tr>
+<th style="text-align:left">情况</th>
+<th style="text-align:left">行为</th>
+</tr></thead><tbody>
+<tr>
+<td style="text-align:left">恰好 1 个端口消失</td>
+<td style="text-align:left">返回该端口路径，提示用户重新插上 USB</td>
+</tr>
+<tr>
+<td style="text-align:left">0 个端口消失</td>
+<td style="text-align:left">抛出 <code>OSError(&quot;No port disappeared...&quot;)</code></td>
+</tr>
+<tr>
+<td style="text-align:left">多个端口消失</td>
+<td style="text-align:left">抛出 <code>OSError(&quot;Multiple ports disappeared...&quot;)</code></td>
+</tr>
+</tbody></table>
+
+<p><strong>使用方式</strong>：</p>
+<pre><code>flexitac-find-port
+# 或
+uv run flexitac-find-port</code></pre>
+
+<hr>
+
+<h3 id="32-flexitac-flash-烧录-arduino-固件">3.2 <code>flexitac-flash</code> —— 烧录 Arduino 固件</h3>
+
+<p><strong>对应的源码文件</strong>：<a href="flexitac/flash.py">flash.py</a></p>
+
+<h4 id="它在干什么">它在干什么？</h4>
+
+<p>这是一个<strong>固件编译与烧录工具</strong>。它将参数化的 Arduino 固件模板渲染后，通过 <code>arduino-cli</code> 编译并上传到 FlexiTac 传感器连接的 Arduino 开发板上。</p>
+
+<h4 id="工作流程">工作流程：</h4>
+
+<pre><code>模板读取 → 参数替换 → 临时目录写入 → arduino-cli compile → arduino-cli upload</code></pre>
+
+<p><strong>步骤详解</strong>：</p>
+
+<ol>
+<li><strong>模板渲染</strong> (<code>render<em>template</code>)：读取 <a href="flexitac/firmware/template.ino">template.ino</a>，用正则匹配 <code>#define ROW</em>COUNT</code>、<code>#define COLUMN<em>COUNT</code>、<code>#define BAUD</em>RATE</code>、<code>#define MUX<em>CHANNEL</em>OFFSET</code> 四行，替换为用户指定的值（或默认值）。</li>
+</ol>
+
+<table><thead><tr>
+<th style="text-align:left"></th>
+<th style="text-align:left">参数</th>
+<th style="text-align:left">默认值</th>
+<th style="text-align:left">含义</th>
+</tr></thead><tbody>
+<tr>
+<td style="text-align:left"></td>
+<td style="text-align:left"><code>rows</code></td>
+<td style="text-align:left">12</td>
+<td style="text-align:left">触觉传感行数</td>
+</tr>
+<tr>
+<td style="text-align:left"></td>
+<td style="text-align:left"><code>cols</code></td>
+<td style="text-align:left">32</td>
+<td style="text-align:left">触觉传感列数</td>
+</tr>
+<tr>
+<td style="text-align:left"></td>
+<td style="text-align:left"><code>baud</code></td>
+<td style="text-align:left">2,000,000</td>
+<td style="text-align:left">串口波特率</td>
+</tr>
+<tr>
+<td style="text-align:left"></td>
+<td style="text-align:left"><code>mux_offset</code></td>
+<td style="text-align:left">4</td>
+<td style="text-align:left">多路复用器通道偏移</td>
+</tr>
+</tbody></table>
+
+<ol>
+<li><strong>板检测</strong> (<code>detect_board</code>)：如果没有通过命令行指定 <code>--port</code> 和 <code>--fqbn</code>，会自动运行 <code>arduino-cli board list</code> 并解析输出，查找唯一连接的 Arduino。恰好一个 → 自动确定；零个 → 报错；多个 → 列出候选让用户选择。</li>
+</ol>
+
+<ol>
+<li><strong>编译与上传</strong> (<code>flash</code>)：</li>
+</ol>
+<ul>
+<li>在临时目录创建 <code>.ino</code> 草图文件</li>
+<li>执行 <code>arduino-cli compile --fqbn &lt;fqbn&gt; &lt;sketch_dir&gt;</code></li>
+<li>执行 <code>arduino-cli upload -p &lt;port&gt; --fqbn &lt;fqbn&gt; &lt;sketch_dir&gt;</code></li>
+</ul>
+
+<h4 id="硬件前提">硬件前提：</h4>
+
+<ul>
+<li>需要安装 <code>arduino-cli</code></li>
+<li>需要安装 Arduino AVR 核心：<code>arduino-cli core install arduino:avr</code></li>
+<li>Linux 下可能需要串口权限（<code>sudo usermod -aG dialout $USER</code>）</li>
+</ul>
+
+<h4 id="使用方式">使用方式：</h4>
+
+<pre><code># 自动检测板子和端口
+flexitac-flash
+
+# 指定参数
+flexitac-flash --port /dev/ttyUSB0 --fqbn arduino:avr:uno
+
+# 非标准传感器尺寸
+flexitac-flash --rows 16 --cols 32 --mux-offset 0</code></pre>
+
+<hr>
+
+<h3 id="33-flexitac-stream-流式帧数据监控">3.3 <code>flexitac-stream</code> —— 流式帧数据监控</h3>
+
+<p><strong>对应的源码文件</strong>：<a href="examples/stream<em>frames.py">stream</em>frames.py</a></p>
+
+<h4 id="它在干什么">它在干什么？</h4>
+
+<p>这是一个<strong>命令行帧数据监控工具</strong>。它从传感器逐帧读取数据，并在终端实时打印每帧的关键统计信息——<strong>让你在不启动图形界面的情况下，也能快速确认传感器是否正常工作</strong>。</p>
+
+<h4 id="它和-heatmap-的区别">它和 heatmap 的区别：</h4>
+
+<p><code>flexitac-stream</code> 是<strong>纯文本、轻量级</strong>的诊断工具（无需 matplotlib），适合在 SSH 远程连接、无图形界面环境或快速调试时使用。<code>flexitac-heatmap</code> 则是<strong>图形化、可视化</strong>工具，适合直观地观察压力分布。</p>
+
+<h4 id="工作流程">工作流程：</h4>
+
+<pre><code>打开传感器 → 校准基线 → 逐帧循环 → 打印 FPS / raw_max / norm_max</code></pre>
+
+<p><strong>步骤详解</strong>：</p>
+
+<ol>
+<li><strong>初始化</strong>：通过 <code>with FlexiTacSensor(...) as sensor</code> 上下文管理器自动打开串口。</li>
+<li><strong>校准</strong>：显式调用 <code>sensor.calibrate()</code>，采集 <code>init_frames</code>（默认 30）帧计算中位数基线。</li>
+<li><strong>循环读取</strong>：通过 <code>for i, frame in enumerate(sensor, start=1)</code> 迭代传感器（<code><strong>iter</strong></code> 内部循环调用 <code>read()</code>）。</li>
+<li><strong>打印统计</strong>：每帧输出一行，包含四项关键指标。</li>
+</ol>
+
+<h4 id="输出的四项指标含义">输出的四项指标含义：</h4>
+
+<pre><code>frame=    10 fps=  85.3 raw_max=104 norm_max=0.000
+frame=    20 fps=  87.1 raw_max=109 norm_max=0.123</code></pre>
+
+<table><thead><tr>
+<th style="text-align:left">指标</th>
+<th style="text-align:left">含义</th>
+<th style="text-align:left">健康范围</th>
+<th style="text-align:left">异常信号</th>
+</tr></thead><tbody>
+<tr>
+<td style="text-align:left"><code>frame</code></td>
+<td style="text-align:left">帧序号（从 1 开始累加）</td>
+<td style="text-align:left">持续递增</td>
+<td style="text-align:left">—</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>fps</code></td>
+<td style="text-align:left">自启动以来的平均帧率</td>
+<td style="text-align:left">~100+（12×32 传感器 @ 2M baud）</td>
+<td style="text-align:left">接近 0 或 <code>TimeoutError</code> → 固件未正确发送数据；检查 <code>--rows</code>/<code>--cols</code>/<code>--baud</code> 参数</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>raw_max</code></td>
+<td style="text-align:left">当前帧原始 ADC 最大值（0-255）</td>
+<td style="text-align:left">静息约 10-40，按压时升高</td>
+<td style="text-align:left">恒为 0 或 255 → 硬件接线问题</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>norm_max</code></td>
+<td style="text-align:left">当前帧归一化信号最大值（0.0-1.0）</td>
+<td style="text-align:left">静息 ≈ 0，按压时向 1.0 上升</td>
+<td style="text-align:left">有按压但不上升 → 基线校准问题或阈值过高</td>
+</tr>
+</tbody></table>
+
+<h4 id="额外功能按行诊断---per-row">额外功能：按行诊断 (<code>--per-row</code>)</h4>
+
+<p>当加 <code>--per-row</code> 参数时：</p>
+<ul>
+<li><strong>启动时</strong>：打印每行的基线平均值（baseline per row），若某行基线异常偏高/偏低，可能该行接线有问题。</li>
+<li><strong>每 20 帧</strong>：打印每行的 <code>raw_max</code>，帮助定位&quot;死行&quot;（某一行的所有列读数恒定）。</li>
+</ul>
+
+<h4 id="使用方式">使用方式：</h4>
+
+<pre><code># 持续运行
+flexitac-stream --port /dev/ttyUSB0
+
+# 仅采集 3000 帧后自动退出
+flexitac-stream --port /dev/ttyUSB0 --frames 3000
+
+# 按行诊断模式
+flexitac-stream --port /dev/ttyUSB0 --per-row
+
+# 非标准传感器尺寸
+flexitac-stream --port /dev/ttyUSB0 --rows 16 --cols 32 --baud 115200</code></pre>
+
+<h4 id="命令行参数一览">命令行参数一览：</h4>
+
+<table><thead><tr>
+<th style="text-align:left">参数</th>
+<th style="text-align:left">默认值</th>
+<th style="text-align:left">说明</th>
+</tr></thead><tbody>
+<tr>
+<td style="text-align:left"><code>--port</code></td>
+<td style="text-align:left">(必填)</td>
+<td style="text-align:left">串口设备路径</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>--rows</code></td>
+<td style="text-align:left">12</td>
+<td style="text-align:left">触觉行数</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>--cols</code></td>
+<td style="text-align:left">32</td>
+<td style="text-align:left">触觉列数</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>--baud</code></td>
+<td style="text-align:left">2,000,000</td>
+<td style="text-align:left">串口波特率</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>--frames</code></td>
+<td style="text-align:left">0 (无限)</td>
+<td style="text-align:left">采集帧数上限，0 表示持续运行</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>--per-row</code></td>
+<td style="text-align:left">False</td>
+<td style="text-align:left">启用按行诊断输出</td>
+</tr>
+</tbody></table>
+
+<hr>
+
+<h3 id="34-flexitac-heatmap-实时热力图可视化">3.4 <code>flexitac-heatmap</code> —— 实时热力图可视化</h3>
+
+<p><strong>对应的源码文件</strong>：<a href="examples/visualize<em>heatmap.py">visualize</em>heatmap.py</a></p>
+
+<h4 id="它在干什么这是最核心的可视化功能">它在干什么？<strong>这是最核心的可视化功能。</strong></h4>
+
+<p><code>flexitac-heatmap</code> 是一个<strong>实时触觉压力热力图</strong>。它将传感器采集的每一帧数据以伪彩色图像的形式动态渲染在屏幕上，让你可以<strong>用眼睛直观地&quot;看到&quot;传感器上的触摸</strong>。</p>
+
+<h4 id="更直白的解释">更直白的解释：</h4>
+
+<p>想象你用手指按压 FlexiTac 传感器表面——屏幕上会实时出现一个彩色矩形，颜色从深蓝（无接触）到亮黄（压力大）变化，<strong>亮斑的位置和形状直接反映你在传感器上触摸的位置和力度</strong>。这就像一个&quot;热量地图&quot;：哪个区域被按得最重，哪个区域颜色就最亮。</p>
+
+<h4 id="为什么叫-heatmap热力图">为什么叫 &quot;heatmap&quot;（热力图）？</h4>
+
+<p>在数据可视化中，heatmap 是一种用颜色编码数值大小的方法——这里&quot;热&quot;不是指物理温度，而是指<strong>压力的&quot;强度&quot;</strong>。颜色映射（colormap, 默认 <code>viridis</code>）将归一化后的触觉信号值（0.0~1.0）映射为颜色：</p>
+
+<ul>
+<li><strong>0.0</strong>（深色/蓝紫色）→ 无接触，基线水平，传感器处于静止状态</li>
+<li><strong>0.5</strong>（中间色/绿色）→ 轻微接触</li>
+<li><strong>1.0</strong>（亮色/黄色）→ 强接触，压力最大</li>
+</ul>
+
+<h4 id="工作流程">工作流程：</h4>
+
+<pre><code>初始化传感器 → 校准基线 → 创建 matplotlib 窗口 → 每 16ms 更新一帧 → 实时渲染</code></pre>
+
+<p><strong>步骤详解</strong>：</p>
+
+<ol>
+<li><strong>初始化与校准</strong>：创建 <code>FlexiTacSensor</code> 并显式调用 <code>calibrate()</code>，采集 30 帧计算每个像素的中位数作为基线（baseline）。</li>
+</ol>
+
+<ol>
+<li><strong>创建 matplotlib 图窗</strong>：</li>
+</ol>
+<ul>
+<li>一个 <code>AxesImage</code>（<code>imshow</code>）显示触觉阵列的归一化数据</li>
+<li>一个 <code>Colorbar</code> 显示颜色与值的映射</li>
+<li>一个标题栏显示当前帧序号和实时 FPS</li>
+</ul>
+
+<ol>
+<li><strong>动画循环</strong> (<code>FuncAnimation</code>, interval=16ms ≈ 60fps)：</li>
+</ol>
+<ul>
+<li>每次调用 <code>sensor.read_latest()</code> 获取最新帧（<strong>跳过积压帧</strong>，保证渲染不滞后）</li>
+<li><code>read_latest()</code> 的策略：先读空串口缓冲区的所有待处理数据，取其中最后一帧完整帧；若缓冲区内没有完整帧，则阻塞等待新的完整帧</li>
+<li>将 <code>frame.normalized</code> 数组更新到 <code>imshow</code></li>
+<li>计算并更新帧率显示</li>
+</ul>
+
+<h4 id="归一化的含义">归一化的含义：</h4>
+
+<p>在 <a href="flexitac/sensor.py">sensor.py</a> 的 <code>_normalize</code> 方法中，原始 ADC 读数经过以下处理：</p>
+
+<pre><code>signal = raw - baseline - threshold          # 减去基线和阈值，只保留有效信号
+signal = clip(signal, 0.0, 100.0)            # 截断到 [0, 100]
+scale = max(signal) + 1e-6                   # 自适应缩放因子（用本帧峰值）
+normalized = clip(signal / scale, 0.0, 1.0)  # 归一化到 [0, 1]</code></pre>
+
+<p>这意味着热力图显示的是<strong>相对于当前帧最强信号的归一化压力分布</strong>——当你按得越重，所有颜色会重新缩放，始终让最大压力处显示为最亮色。这使得热力图对接触的<strong>空间分布</strong>特别敏感（你在按哪里），而对绝对力度不敏感。</p>
+
+<h4 id="使用方式">使用方式：</h4>
+
+<pre><code>flexitac-heatmap --port /dev/ttyUSB0
+
+# 可选参数
+flexitac-heatmap --port /dev/ttyUSB0 --rows 12 --cols 32 --cmap plasma</code></pre>
+
+<hr>
+
+<h2 id="四传感器数据协议">四、传感器数据协议</h2>
+
+<p>FlexiTac 传感器通过串口以 <strong>帧协议</strong> 持续发送数据：</p>
+
+<pre><code>[0xAA] [0x55] [byte_0] [byte_1] ... [byte_N-1]
+  ↑ 帧头标记（2 bytes）     ↑ rows × cols 个 uint8 ADC samples
+                           （12×32 = 384 bytes/帧，默认配置）</code></pre>
+
+<p>每个 byte 是 10-bit ADC 读数右移 2 位的结果（即 0-255），代表对应像素的模拟电压值。</p>
+
+<hr>
+
+<h2 id="五数据流全貌">五、数据流全貌</h2>
+
+<pre><code>┌──────────────────┐    Serial (2M baud)    ┌──────────────────┐
+│  Arduino 开发板   │ ──────────────────────▶│  Python 主机      │
+│  (FlexiTac 固件) │  0xAA 0x55 + 384bytes  │  (PyFlexiTac)    │
+│                  │   循环发送，~100+ fps    │                  │
+└──────────────────┘                        └──────────────────┘
+                                                    │
+                                           ┌────────▼────────┐
+                                           │  FlexiTacSensor  │
+                                           │  ├ 帧同步 (marker)│
+                                           │  ├ 基线校准       │
+                                           │  ├ 信号归一化     │
+                                           │  └ FlexiTacFrame  │
+                                           └────────┬────────┘
+                                                    │
+                                    ┌───────────────┼───────────────┐
+                                    ▼               ▼               ▼
+                            flexitac-stream   flexitac-heatmap   自定义代码
+                            (打印统计信息)    (实时热力图)      (FlexiTacSensor
+                                                              直接编程使用)</code></pre>
+
+<hr>
+
+<h2 id="六关键设计决策与亮点">六、关键设计决策与亮点</h2>
+
+<ol>
+<li><strong>自适应归一化</strong>：使用当前帧的峰值作为归一化缩放因子（而非全局固定值），保证了热力图在不同按压力度下都能清晰显示压力分布。</li>
+</ol>
+
+<ol>
+<li><strong>帧协议鲁棒性</strong>：<a href="flexitac/sensor.py#L156-L168">sensor.py:156-168</a> 的 <code><em>pop</em>frame</code> 方法能处理垃圾字节、分片到达的 marker 等异常情况。</li>
+</ol>
+
+<ol>
+<li><strong>read_latest 机制</strong>：<a href="flexitac/sensor.py#L128-L148">sensor.py:128-148</a> 支持跳过积压帧，确保可视化不滞后——这对于实时热力图至关重要。</li>
+</ol>
+
+<ol>
+<li><strong>参数化固件</strong>：模板替换而非代码生成，保持固件代码可读性，同时支持不同尺寸和接线配置的传感器。</li>
+</ol>
+
+<ol>
+<li><strong>零依赖启动</strong>：核心功能仅需 <code>numpy</code> + <code>pyserial</code>，matplotlib 只在需要热力图可视化时作为可选依赖安装。</li>
+</ol>
+
+<hr>
+
+<h2 id="七开发工具链">七、开发工具链</h2>
+
+<table><thead><tr>
+<th style="text-align:left">工具</th>
+<th style="text-align:left">用途</th>
+</tr></thead><tbody>
+<tr>
+<td style="text-align:left"><code>ruff</code></td>
+<td style="text-align:left">代码格式化 + Linting</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>mypy</code></td>
+<td style="text-align:left">静态类型检查（严格模式）</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>pytest</code></td>
+<td style="text-align:left">单元测试（含 monkeypatch）</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>uv</code></td>
+<td style="text-align:left">包管理与虚拟环境</td>
+</tr>
+</tbody></table>
+
+<pre><code>make format         # 格式化和自动修复
+make static-checks  # ruff + mypy
+make test           # pytest</code></pre>
+
+</body>
+</html>
