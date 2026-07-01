@@ -1,0 +1,695 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>LeRobot 数据集记录（Record）详解</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    line-height: 1.7; color: #24292e; background: #fff;
+    max-width: 800px; margin: 0 auto; padding: 16px;
+    font-size: 16px;
+}
+h1 { font-size: 1.8em; border-bottom: 2px solid #e1e4e8; padding-bottom: 0.3em; margin: 24px 0 16px; }
+h2 { font-size: 1.45em; border-bottom: 1px solid #e1e4e8; padding-bottom: 0.3em; margin: 24px 0 16px; }
+h3 { font-size: 1.25em; margin: 24px 0 16px; }
+h4 { font-size: 1.1em; margin: 24px 0 16px; }
+p { margin: 0 0 16px; }
+a { color: #0366d6; text-decoration: none; }
+a:hover { text-decoration: underline; }
+code {
+    background: #f6f8fa; padding: 2px 6px; border-radius: 4px;
+    font-family: 'SF Mono', 'Fira Code', monospace; font-size: 0.9em;
+}
+pre {
+    background: #f6f8fa; padding: 16px; border-radius: 6px;
+    overflow-x: auto; margin: 0 0 16px; line-height: 1.45;
+}
+pre code { background: none; padding: 0; }
+blockquote {
+    border-left: 4px solid #dfe2e5; padding: 0 16px; color: #6a737d; margin: 0 0 16px;
+}
+table { border-collapse: collapse; width: 100%; margin: 0 0 16px; }
+th, td { border: 1px solid #dfe2e5; padding: 8px 12px; text-align: left; }
+th { background: #f6f8fa; font-weight: 600; }
+tr:nth-child(even) { background: #f6f8fa; }
+ul, ol { padding-left: 2em; margin: 0 0 16px; }
+li { margin: 4px 0; }
+img { max-width: 100%; }
+hr { border: none; border-top: 1px solid #e1e4e8; margin: 24px 0; }
+strong { font-weight: 600; }
+.index-list { list-style: none; padding: 0; }
+.index-list li { margin: 12px 0; padding: 12px 16px; background: #f6f8fa; border-radius: 8px; }
+.index-list a { font-size: 1.1em; font-weight: 500; }
+.back-link { display: inline-block; margin-bottom: 16px; color: #586069; font-size: 0.9em; }
+</style>
+</head>
+<body>
+<a class="back-link" href="index.html">← 返回索引</a>
+<h1 id="lerobot-数据集记录record详解">LeRobot 数据集记录（Record）详解</h1>
+
+<blockquote>基于 <code>src/lerobot/scripts/lerobot_record.py</code>（631行）及数据集模块的逐层分析，全面解析数据集录制的架构设计与实现原理。</blockquote>
+
+<hr>
+
+<h2 id="目录">目录</h2>
+
+<ol>
+<li><a href="#1-概述">概述</a></li>
+<li><a href="#2-配置体系">配置体系</a></li>
+<li><a href="#3-record-主流程">record() 主流程</a></li>
+<li><a href="#4-record<em>loop-核心循环">record</em>loop() 核心循环</a></li>
+<li><a href="#5-动作源遥操作-vs-策略">动作源：遥操作 vs 策略</a></li>
+<li><a href="#6-数据集创建与写入">数据集创建与写入</a></li>
+<li><a href="#7-视频编码机制">视频编码机制</a></li>
+<li><a href="#8-episode-管理">Episode 管理</a></li>
+<li><a href="#9-完整数据流总结">完整数据流总结</a></li>
+</ol>
+
+<hr>
+
+<h2 id="1-概述">1. 概述</h2>
+
+<p><code>lerobot_record</code> 是 LeRobot 的数据采集核心。它将遥操作（或策略推断）产生的传感器数据实时记录为结构化的 LeRobot 数据集。</p>
+
+<p><strong>支持的录制模式</strong>：</p>
+<ul>
+<li><strong>纯遥操作记录</strong>：主手控制从手，记录示范数据</li>
+<li><strong>策略驱动记录</strong>：预训练策略控制机器人，记录评估数据</li>
+<li><strong>混合模式</strong>：同时配置遥操作和策略进行记录</li>
+</ul>
+
+<hr>
+
+<h2 id="2-配置体系">2. 配置体系</h2>
+
+<h3 id="21-录制主配置-recordconfig">2.1 录制主配置 <code>RecordConfig</code></h3>
+
+<pre><code>@dataclass
+class RecordConfig:
+    robot: RobotConfig                           # 从手机器人配置
+    dataset: DatasetRecordConfig                 # 数据集配置
+    teleop: TeleoperatorConfig | None = None     # 主手配置 (可选)
+    policy: PreTrainedConfig | None = None       # 策略配置 (可选)
+    display_data: bool = False                   # 是否显示数据 (Rerun)
+    display_ip: str | None = None                # Rerun 服务器 IP
+    display_port: int | None = None              # Rerun 服务器端口
+    display_compressed_images: bool = False      # 是否压缩图像传输
+    play_sounds: bool = True                     # 是否语音播报
+    resume: bool = False                         # 是否续录已有数据集</code></pre>
+
+<h3 id="22-数据集配置-datasetrecordconfig">2.2 数据集配置 <code>DatasetRecordConfig</code></h3>
+
+<pre><code>@dataclass
+class DatasetRecordConfig:
+    repo_id: str                            # 数据集 ID (hf_username/dataset_name)
+    single_task: str                        # 任务描述
+    root: str | Path | None = None          # 本地存储路径
+    fps: int = 30                           # 目标帧率
+    episode_time_s: int | float = 60        # 每个 episode 录制时长
+    reset_time_s: int | float = 60          # episode 间重置时间
+    num_episodes: int = 50                  # 总录制 episode 数
+    video: bool = True                      # 是否编码视频
+    push_to_hub: bool = True                # 是否推送至 HuggingFace Hub
+    private: bool = False                   # 是否私有仓库
+    tags: list[str] | None = None           # Hub 标签
+    num_image_writer_processes: int = 0     # 图像写入进程数
+    num_image_writer_threads_per_camera: int = 4  # 每相机线程数
+    video_encoding_batch_size: int = 1      # 批量编码 episode 数
+    vcodec: str = &quot;libsvtav1&quot;               # 视频编码器
+    streaming_encoding: bool = False        # 是否实时流式编码
+    encoder_queue_maxsize: int = 30         # 编码器缓冲大小
+    encoder_threads: int | None = None      # 编码器线程数
+    rename_map: dict[str, str] = {}         # 观察键重命名
+    tactile_calibration_timeout_s: float = 30.0  # 触觉标定超时</code></pre>
+
+<hr>
+
+<h2 id="3-record-主流程">3. record() 主流程</h2>
+
+<p><strong>文件</strong>: <code>src/lerobot/scripts/lerobot_record.py:439-621</code></p>
+
+<pre><code>@parser.wrap()
+def record(cfg: RecordConfig) -&gt; LeRobotDataset:
+    # === 1. 初始化 ===
+    init_logging()
+    init_rerun()  # 可选的数据可视化
+
+    # === 2. 创建设备 ===
+    robot = make_robot_from_config(cfg.robot)
+    teleop = make_teleoperator_from_config(cfg.teleop) if cfg.teleop else None
+
+    # === 3. 创建处理器管道 ===
+    # 三个处理器：遥操作动作处理器、机器人动作处理器、机器人观察处理器
+    teleop_action_processor, robot_action_processor, robot_observation_processor = \
+        make_default_processors()
+    # 默认均为 IdentityProcessor (不做任何变换)
+
+    # === 4. 聚合特征定义 ===
+    # 将遥操作和机器人观察的特征合并为数据集特征
+    dataset_features = combine_feature_dicts(
+        aggregate_pipeline_dataset_features(
+            pipeline=teleop_action_processor,
+            initial_features=create_initial_features(action=robot.action_features),
+            use_videos=cfg.dataset.video,
+        ),
+        aggregate_pipeline_dataset_features(
+            pipeline=robot_observation_processor,
+            initial_features=create_initial_features(observation=robot.observation_features),
+            use_videos=cfg.dataset.video,
+        ),
+    )
+
+    # === 5. 创建或加载数据集 ===
+    if cfg.resume:
+        dataset = LeRobotDataset(repo_id, root=root, ...)  # 加载已有
+        sanity_check_dataset_robot_compatibility(dataset, robot, ...)
+    else:
+        sanity_check_dataset_name(repo_id, policy)
+        dataset = LeRobotDataset.create(   # 创建新数据集
+            repo_id, fps, root=root,
+            robot_type=robot.name,
+            features=dataset_features,
+            use_videos=cfg.dataset.video,
+            streaming_encoding=cfg.dataset.streaming_encoding,
+            ...
+        )
+
+    # === 6. 加载策略 (如果配置) ===
+    if cfg.policy is not None:
+        policy = make_policy(cfg.policy, ds_meta=dataset.meta)
+        preprocessor, postprocessor = make_pre_post_processors(
+            policy_cfg=cfg.policy, dataset_stats=dataset.meta.stats, ...
+        )
+
+    # === 7. 连接设备 ===
+    robot.connect()
+    if teleop: teleop.connect()
+
+    # === 8. 触觉传感器元数据记录 ===
+    if hasattr(robot, &quot;tactile_sensor_metadata&quot;):
+        robot.wait_for_tactile_calibration(timeout_s=...)
+        dataset.meta.info[&quot;tactile_sensors&quot;] = robot.tactile_sensor_metadata()
+        write_info(dataset.meta.info, dataset.meta.root)
+
+    # === 9. 键盘监听 ===
+    listener, events = init_keyboard_listener()
+    # events = {&quot;exit_early&quot;: False, &quot;rerecord_episode&quot;: False, &quot;stop_recording&quot;: False}
+    # 右箭头: exit_early | 左箭头: rerecord_episode | ESC: stop_recording
+
+    # === 10. 录制循环 ===
+    with VideoEncodingManager(dataset):
+        recorded_episodes = 0
+        while recorded_episodes &lt; num_episodes and not events[&quot;stop_recording&quot;]:
+            # 录制一个 episode
+            record_loop(robot, events, fps, ..., control_time_s=episode_time_s, ...)
+
+            # Episode 间重置 (跳过最后一个)
+            if not events[&quot;stop_recording&quot;] and (recorded_episodes &lt; num_episodes - 1):
+                record_loop(robot, events, fps, ..., control_time_s=reset_time_s, dataset=None, ...)
+
+            # 处理重新录制请求
+            if events[&quot;rerecord_episode&quot;]:
+                events[&quot;rerecord_episode&quot;] = False
+                dataset.clear_episode_buffer()
+                continue
+
+            dataset.save_episode()
+            recorded_episodes += 1
+
+    # === 11. 收尾 ===
+    finally:
+        dataset.finalize()            # 关闭 writer, 合并视频, 计算统计量
+        robot.disconnect()
+        teleop.disconnect() if teleop else None
+        if cfg.dataset.push_to_hub:
+            dataset.push_to_hub(tags=tags, private=private)</code></pre>
+
+<hr>
+
+<h2 id="4-record_loop-核心循环">4. record_loop() 核心循环</h2>
+
+<p><strong>文件</strong>: <code>src/lerobot/scripts/lerobot_record.py:284-437</code></p>
+
+<h3 id="41-数据流图">4.1 数据流图</h3>
+
+<pre><code>       [ Robot ]
+           │
+     robot.get_observation()  ──→ raw_obs
+           │
+     robot_observation_processor ──→ processed_obs
+           │
+     ┌─────┴───── (动作来源) ─────┐
+     │                              │
+ [Teleoperator]                 [Policy]
+     │                              │
+ teleop.get_action()         predict_action()
+     │                              │
+ teleop_action_processor      preprocessor → policy → postprocessor
+     │                              │
+     └─────┬────────────────────────┘
+           │
+     robot_action_processor ──→ robot_action_to_send
+           │
+     robot.send_action() ──→ (Robot 执行)
+           │
+     build_dataset_frame() ──→ dataset.add_frame()
+           │
+     log_rerun_data() + precise_sleep()</code></pre>
+
+<h3 id="42-逐帧循环代码">4.2 逐帧循环代码</h3>
+
+<pre><code>def record_loop(robot, events, fps, ...):
+    timestamp = 0
+    start_episode_t = time.perf_counter()
+
+    while timestamp &lt; control_time_s:
+        start_loop_t = time.perf_counter()
+
+        # 检查是否提前退出
+        if events[&quot;exit_early&quot;]:
+            events[&quot;exit_early&quot;] = False
+            break
+
+        # 步骤 1: 读取机器人观察
+        obs = robot.get_observation()
+        # obs = {
+        #     &quot;shoulder_pan.pos&quot;: 0.52,   # 关节角度
+        #     &quot;shoulder_lift.pos&quot;: -0.31,
+        #     ...,
+        #     &quot;front&quot;: np.ndarray(H, W, 3),  # 相机图像
+        #     &quot;side&quot;: np.ndarray(H, W, 3),
+        #     &quot;observation.tactile.primary&quot;: np.ndarray(12, 32),  # 触觉 (可选)
+        # }
+
+        obs_processed = robot_observation_processor(obs)
+
+        # 步骤 2: 构建观察帧
+        observation_frame = build_dataset_frame(
+            dataset.features, obs_processed, prefix=&quot;observation.&quot;
+        )
+
+        # 步骤 3: 获取动作 (遥操作 或 策略)
+        # ... (详见第5节)
+
+        # 步骤 4: 应用机器人动作处理器
+        robot_action_to_send = robot_action_processor((action, obs))
+
+        # 步骤 5: 发送动作到机器人
+        _sent_action = robot.send_action(robot_action_to_send)
+
+        # 步骤 6: 写入数据集
+        if dataset is not None:
+            action_frame = build_dataset_frame(dataset.features, action, prefix=&quot;action.&quot;)
+            frame = {**observation_frame, **action_frame, &quot;task&quot;: single_task}
+            dataset.add_frame(frame)
+
+        # 步骤 7: 可视化 (可选)
+        if display_data:
+            log_rerun_data(observation=obs_processed, action=action, ...)
+
+        # 步骤 8: 精确等待以维持目标 FPS
+        dt_s = time.perf_counter() - start_loop_t
+        sleep_time_s = 1 / fps - dt_s
+        if sleep_time_s &lt; 0:
+            logging.warning(f&quot;Loop running slower ({1/dt_s:.1f} Hz) than target ({fps} Hz)&quot;)
+        precise_sleep(max(sleep_time_s, 0.0))
+
+        timestamp = time.perf_counter() - start_episode_t</code></pre>
+
+<hr>
+
+<h2 id="5-动作源遥操作-vs-策略">5. 动作源：遥操作 vs 策略</h2>
+
+<h3 id="51-遥操作模式">5.1 遥操作模式</h3>
+
+<pre><code>if policy is None and isinstance(teleop, Teleoperator):
+    # 特殊处理: Unitree G1 发送力反馈
+    if robot.name == &quot;unitree_g1&quot;:
+        teleop.send_feedback(obs)
+
+    act = teleop.get_action()
+    # act = {
+    #     &quot;shoulder_pan.pos&quot;: 0.52,
+    #     &quot;shoulder_lift.pos&quot;: -0.31,
+    #     ...
+    # }
+
+    act_processed_teleop = teleop_action_processor((act, obs))
+    # 默认: IdentityProcessor, 不做变换</code></pre>
+
+<h3 id="52-策略推断模式">5.2 策略推断模式</h3>
+
+<pre><code>if policy is not None and preprocessor is not None:
+    action_values = predict_action(
+        observation=observation_frame,
+        policy=policy,
+        device=get_safe_torch_device(policy.config.device),
+        preprocessor=preprocessor,     # Rename → ToBatch → Device → Normalize
+        postprocessor=postprocessor,   # Unnormalize → Device(CPU)
+        use_amp=policy.config.use_amp,
+        task=single_task,
+        robot_type=robot.robot_type,
+    )
+
+    act_processed_policy = make_robot_action(action_values, dataset.features)</code></pre>
+
+<p><strong><code>predict<em>action()</code> 实现</strong> (<code>src/lerobot/utils/control</em>utils.py</code>):</p>
+
+<pre><code>def predict_action(observation, policy, device, preprocessor, postprocessor, ...):
+    # 1. 将观察转为 PyTorch 张量
+    observation = {k: torch.tensor(v).to(device) for k, v in observation.items()}
+
+    # 2. 通过预处理器
+    observation = preprocessor(observation)
+    # 步骤: RenameObservations → AddBatchDim → ToDevice → Normalize
+
+    # 3. 策略推理
+    with torch.inference_mode(), torch.autocast(device) if use_amp else nullcontext():
+        action = policy.select_action(observation)
+
+    # 4. 通过后处理器
+    action = postprocessor(action)
+    # 步骤: Unnormalize → ToDevice(CPU)
+
+    return action.to(&quot;cpu&quot;).numpy()</code></pre>
+
+<h3 id="53-多遥操作-lekiwi-专用">5.3 多遥操作 (LeKiwi 专用)</h3>
+
+<pre><code>if isinstance(teleop, list):
+    # 键盘 + 臂的联合控制
+    arm_action = teleop_arm.get_action()
+    keyboard_action = teleop_keyboard.get_action()
+    base_action = robot._from_keyboard_to_base_action(keyboard_action)
+    act = {**arm_action, **base_action}</code></pre>
+
+<hr>
+
+<h2 id="6-数据集创建与写入">6. 数据集创建与写入</h2>
+
+<h3 id="61-数据集创建">6.1 数据集创建</h3>
+
+<pre><code>dataset = LeRobotDataset.create(
+    repo_id, fps,
+    root=root,
+    robot_type=robot.name,      # 如 &quot;so100_follower&quot;
+    features=dataset_features,  # 由处理器管道聚合而来
+    use_videos=True,            # 图像编码为视频
+    image_writer_processes=0,   # 0 = 使用线程而非进程
+    image_writer_threads=4 * len(robot.cameras),
+    batch_encoding_size=1,      # 每个 episode 立即编码
+    vcodec=&quot;libsvtav1&quot;,
+    streaming_encoding=False,
+    ...
+)</code></pre>
+
+<h3 id="62-add_frame-数据写入">6.2 add_frame() → 数据写入</h3>
+
+<pre><code># record_loop 中每帧调用
+frame = {
+    # --- 观察 ---
+    &quot;observation.state&quot;: np.array([...]),          # (6,) float32
+    &quot;observation.images.front&quot;: np.ndarray(480, 640, 3),  # HWC uint8
+    &quot;observation.images.side&quot;: np.ndarray(480, 640, 3),
+    &quot;observation.tactile.primary&quot;: np.ndarray(12, 32),   # float32
+    # --- 动作 ---
+    &quot;action&quot;: np.array([...]),                     # (6,) float32
+    # --- 元数据 ---
+    &quot;task&quot;: &quot;Grab the cube&quot;,                       # 字符串
+    &quot;timestamp&quot;: 1.23,                             # float
+    &quot;episode_index&quot;: 0,                            # int
+    &quot;frame_index&quot;: 37,                             # int
+}
+
+dataset.add_frame(frame)
+# 内部: 验证 → 转 numpy → 追加到 episode_buffer
+# 图像: 写入 PNG (或送 streaming encoder)</code></pre>
+
+<h3 id="63-save_episode-episode-持久化">6.3 save_episode() → Episode 持久化</h3>
+
+<pre><code>dataset.save_episode()
+# 内部流程:
+# 1. validate_episode_buffer() — 验证数据完整性
+# 2. 写入 parquet 文件 (使用 PyArrow ParquetWriter)
+#    - 按 100MB 大小自动分片 (chunk/file 轮转)
+# 3. 编码视频:
+#    - PNG 模式: 将 episode 的所有图像帧编码为 mp4
+#    - Streaming 模式: 收集 encoder 线程的输出 mp4
+# 4. 更新 episode 元数据 (episodes parquet)
+# 5. 聚合统计量 (compute_episode_stats)</code></pre>
+
+<hr>
+
+<h2 id="7-视频编码机制">7. 视频编码机制</h2>
+
+<h3 id="71-三种编码模式">7.1 三种编码模式</h3>
+
+<table>
+<thead><tr>
+<th style="text-align:left">模式</th>
+<th style="text-align:left">配置</th>
+<th style="text-align:left">图像写入</th>
+<th style="text-align:left">视频编码时机</th>
+<th style="text-align:left">延迟</th>
+</tr></thead>
+<tbody>
+<tr>
+<td style="text-align:left"><strong>PNG 模式</strong></td>
+<td style="text-align:left"><code>streaming_encoding=False</code></td>
+<td style="text-align:left">异步写 PNG (AsyncImageWriter)</td>
+<td style="text-align:left"><code>save_episode()</code> 时编码</td>
+<td style="text-align:left">高</td>
+</tr>
+<tr>
+<td style="text-align:left"><strong>Streaming 模式</strong></td>
+<td style="text-align:left"><code>streaming_encoding=True</code></td>
+<td style="text-align:left">无 (直接送编码器)</td>
+<td style="text-align:left">实时编码</td>
+<td style="text-align:left">低</td>
+</tr>
+<tr>
+<td style="text-align:left"><strong>Batched 模式</strong></td>
+<td style="text-align:left"><code>batch<em>encoding</em>size &gt; 1</code></td>
+<td style="text-align:left">异步写 PNG</td>
+<td style="text-align:left">积攒多个 episode 后批量编码</td>
+<td style="text-align:left">最高延迟，最高吞吐</td>
+</tr>
+</tbody></table>
+
+<h3 id="72-streaming-编码流程">7.2 Streaming 编码流程</h3>
+
+<pre><code>Record Loop (每帧):
+  camera_frame (HWC uint8)
+      │
+      ▼
+  StreamingVideoEncoder.feed_frame(camera_key, frame, stats_collector)
+      │
+      ├── 帧进入 per-camera 编码线程队列
+      │   _CameraEncoderThread:
+      │     while running:
+      │       frame = queue.get()
+      │       av_frame = av.VideoFrame.from_ndarray(frame, format=&quot;rgb24&quot;)
+      │       encoder.encode(av_frame)  → 写入 mp4 文件
+      │       stats_collector.update(frame)  → 在线计算统计量
+      │
+      ▼
+  (非阻塞, 立即返回)
+
+save_episode():
+  StreamingVideoEncoder.finish_episode(camera_key)
+      │
+      ├── 发送 sentinel 停止编码线程
+      ├── 等待线程退出
+      ├── 收集输出的 mp4 文件路径
+      └── 返回每相机统计量
+
+concat (finalize 时):
+  将同一 camera key 的多个 episode mp4 合并为一个文件</code></pre>
+
+<h3 id="73-支持的编解码器">7.3 支持的编解码器</h3>
+
+<pre><code># libsvtav1 - 默认, 开源 AV1 编码器, 最佳压缩比
+# h264      - 广泛兼容
+# hevc      - H.265, 高压缩比
+# auto      - 自动检测最佳硬件编码器:
+#   macOS:   h264_videotoolbox
+#   NVIDIA:  h264_nvenc
+#   Intel:   h264_vaapi 或 h264_qsv</code></pre>
+
+<hr>
+
+<h2 id="8-episode-管理">8. Episode 管理</h2>
+
+<h3 id="81-episode-生命周期">8.1 Episode 生命周期</h3>
+
+<pre><code>┌──────────────────────────────────────────────────────┐
+│  录制循环 (while recorded_episodes &lt; num_episodes)    │
+│                                                      │
+│  ┌─────────────────────────────────────────────┐     │
+│  │ Episode N: record_loop() (episode_time_s)   │     │
+│  │   add_frame() × N                           │     │
+│  │   → save_episode()                          │     │
+│  └─────────────────────────────────────────────┘     │
+│                      │                               │
+│                      ▼                               │
+│  ┌─────────────────────────────────────────────┐     │
+│  │ Reset: record_loop() (reset_time_s)         │     │
+│  │   dataset=None (不记录数据)                  │     │
+│  │   robot 执行动作但不写入数据集               │     │
+│  └─────────────────────────────────────────────┘     │
+│                      │                               │
+│                      ▼                               │
+│  (检查 rerecord_episode → 清除 buffer, 重新录制)     │
+│  (检查 stop_recording → 退出循环)                     │
+└──────────────────────────────────────────────────────┘</code></pre>
+
+<h3 id="82-键盘控制">8.2 键盘控制</h3>
+
+<table>
+<thead><tr>
+<th style="text-align:left">按键</th>
+<th style="text-align:left">事件</th>
+<th style="text-align:left">效果</th>
+</tr></thead>
+<tbody>
+<tr>
+<td style="text-align:left">右箭头 <code>→</code></td>
+<td style="text-align:left"><code>exit_early</code></td>
+<td style="text-align:left">提前结束当前 episode</td>
+</tr>
+<tr>
+<td style="text-align:left">左箭头 <code>←</code></td>
+<td style="text-align:left"><code>rerecord_episode</code></td>
+<td style="text-align:left">放弃当前 episode, 重新录制</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>ESC</code></td>
+<td style="text-align:left"><code>stop_recording</code></td>
+<td style="text-align:left">停止录制, 保存已有数据</td>
+</tr>
+</tbody></table>
+
+<h3 id="83-续录-resume">8.3 续录 (Resume)</h3>
+
+<pre><code>if cfg.resume:
+    # 加载已有数据集, 从上次结束位置继续
+    dataset = LeRobotDataset(repo_id, root=root, ...)
+    # dataset._recorded_frames 自动跟踪已录制的帧数
+    # 新 episode 追加到已有 parquet/video 文件之后</code></pre>
+
+<hr>
+
+<h2 id="9-完整数据流总结">9. 完整数据流总结</h2>
+
+<pre><code>┌──────────────────────────────────────────────────────┐
+│                 配置 (CLI 参数)                       │
+│  RecordConfig { robot, dataset, teleop?, policy? }   │
+└────────────────────────┬─────────────────────────────┘
+                         │
+                         ▼
+┌──────────────────────────────────────────────────────┐
+│              工厂创建 (make_*)                        │
+│  robot ← make_robot_from_config()                    │
+│  teleop ← make_teleoperator_from_config()            │
+│  dataset ← LeRobotDataset.create()                   │
+│  policy ← make_policy()                              │
+└────────────────────────┬─────────────────────────────┘
+                         │
+                         ▼
+┌──────────────────────────────────────────────────────┐
+│          设备连接 + 触觉标定                           │
+│  robot.connect()    teleop.connect()                 │
+│  wait_for_tactile_calibration()                      │
+└────────────────────────┬─────────────────────────────┘
+                         │
+                         ▼
+┌──────────────────────────────────────────────────────┐
+│           录制循环 (每个 episode)                     │
+│                                                      │
+│  for episode in range(num_episodes):                 │
+│    ┌──────────────────────────────────────┐          │
+│    │ record_loop() — 逐帧:               │          │
+│    │  1. robot.get_observation()          │          │
+│    │  2. 动作源 → 动作                    │          │
+│    │  3. robot.send_action()              │          │
+│    │  4. dataset.add_frame()              │          │
+│    │  5. precise_sleep(1/fps)             │          │
+│    └──────────────────────────────────────┘          │
+│    ┌──────────────────────────────────────┐          │
+│    │ reset_loop() — 环境重置 (不记录)     │          │
+│    └──────────────────────────────────────┘          │
+│    dataset.save_episode()                            │
+└────────────────────────┬─────────────────────────────┘
+                         │
+                         ▼
+┌──────────────────────────────────────────────────────┐
+│              收尾 (finalize)                          │
+│  dataset.finalize()                                  │
+│    → 关闭 parquet writer                             │
+│    → 合并视频文件 (concatenate_video_files)           │
+│    → 计算全局统计量 (aggregate_stats)                 │
+│  robot.disconnect()                                  │
+│  teleop.disconnect()                                 │
+│  dataset.push_to_hub()  (可选)                       │
+└──────────────────────────────────────────────────────┘</code></pre>
+
+<hr>
+
+<h2 id="附录关键文件索引">附录：关键文件索引</h2>
+
+<table>
+<thead><tr>
+<th style="text-align:left">功能</th>
+<th style="text-align:left">文件</th>
+</tr></thead>
+<tbody>
+<tr>
+<td style="text-align:left">录制主入口</td>
+<td style="text-align:left"><code>src/lerobot/scripts/lerobot_record.py</code></td>
+</tr>
+<tr>
+<td style="text-align:left">数据集类</td>
+<td style="text-align:left"><code>src/lerobot/datasets/lerobot_dataset.py</code> — <code>LeRobotDataset</code></td>
+</tr>
+<tr>
+<td style="text-align:left">数据集元数据</td>
+<td style="text-align:left"><code>src/lerobot/datasets/dataset_metadata.py</code> — <code>LeRobotDatasetMetadata</code></td>
+</tr>
+<tr>
+<td style="text-align:left">特征工具</td>
+<td style="text-align:left"><code>src/lerobot/datasets/feature<em>utils.py</code> — <code>build</em>dataset_frame</code></td>
+</tr>
+<tr>
+<td style="text-align:left">视频编码</td>
+<td style="text-align:left"><code>src/lerobot/datasets/video_utils.py</code> — <code>StreamingVideoEncoder</code></td>
+</tr>
+<tr>
+<td style="text-align:left">图像写入</td>
+<td style="text-align:left"><code>src/lerobot/datasets/image_writer.py</code> — <code>AsyncImageWriter</code></td>
+</tr>
+<tr>
+<td style="text-align:left">策略推断</td>
+<td style="text-align:left"><code>src/lerobot/utils/control<em>utils.py</code> — <code>predict</em>action</code></td>
+</tr>
+<tr>
+<td style="text-align:left">可视化</td>
+<td style="text-align:left"><code>src/lerobot/utils/visualization<em>utils.py</code> — <code>log</em>rerun_data</code></td>
+</tr>
+<tr>
+<td style="text-align:left">精确睡眠</td>
+<td style="text-align:left"><code>src/lerobot/utils/robot<em>utils.py</code> — <code>precise</em>sleep</code></td>
+</tr>
+<tr>
+<td style="text-align:left">键盘监听</td>
+<td style="text-align:left"><code>src/lerobot/utils/control<em>utils.py</code> — <code>init</em>keyboard_listener</code></td>
+</tr>
+<tr>
+<td style="text-align:left">策略工厂</td>
+<td style="text-align:left"><code>src/lerobot/policies/factory.py</code> — <code>make<em>policy</code>, <code>make</em>pre<em>post</em>processors</code></td>
+</tr>
+</tbody></table>
+
+</body>
+</html>

@@ -1,0 +1,671 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>LeRobot 训练（Train）详解</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    line-height: 1.7; color: #24292e; background: #fff;
+    max-width: 800px; margin: 0 auto; padding: 16px;
+    font-size: 16px;
+}
+h1 { font-size: 1.8em; border-bottom: 2px solid #e1e4e8; padding-bottom: 0.3em; margin: 24px 0 16px; }
+h2 { font-size: 1.45em; border-bottom: 1px solid #e1e4e8; padding-bottom: 0.3em; margin: 24px 0 16px; }
+h3 { font-size: 1.25em; margin: 24px 0 16px; }
+h4 { font-size: 1.1em; margin: 24px 0 16px; }
+p { margin: 0 0 16px; }
+a { color: #0366d6; text-decoration: none; }
+a:hover { text-decoration: underline; }
+code {
+    background: #f6f8fa; padding: 2px 6px; border-radius: 4px;
+    font-family: 'SF Mono', 'Fira Code', monospace; font-size: 0.9em;
+}
+pre {
+    background: #f6f8fa; padding: 16px; border-radius: 6px;
+    overflow-x: auto; margin: 0 0 16px; line-height: 1.45;
+}
+pre code { background: none; padding: 0; }
+blockquote {
+    border-left: 4px solid #dfe2e5; padding: 0 16px; color: #6a737d; margin: 0 0 16px;
+}
+table { border-collapse: collapse; width: 100%; margin: 0 0 16px; }
+th, td { border: 1px solid #dfe2e5; padding: 8px 12px; text-align: left; }
+th { background: #f6f8fa; font-weight: 600; }
+tr:nth-child(even) { background: #f6f8fa; }
+ul, ol { padding-left: 2em; margin: 0 0 16px; }
+li { margin: 4px 0; }
+img { max-width: 100%; }
+hr { border: none; border-top: 1px solid #e1e4e8; margin: 24px 0; }
+strong { font-weight: 600; }
+.index-list { list-style: none; padding: 0; }
+.index-list li { margin: 12px 0; padding: 12px 16px; background: #f6f8fa; border-radius: 8px; }
+.index-list a { font-size: 1.1em; font-weight: 500; }
+.back-link { display: inline-block; margin-bottom: 16px; color: #586069; font-size: 0.9em; }
+</style>
+</head>
+<body>
+<a class="back-link" href="index.html">← 返回索引</a>
+<h1 id="lerobot-训练train详解">LeRobot 训练（Train）详解</h1>
+
+<blockquote>基于 <code>src/lerobot/scripts/lerobot_train.py</code>（549行）及相关模块，全面解析离线策略训练的架构设计与实现原理。</blockquote>
+
+<hr>
+
+<h2 id="目录">目录</h2>
+
+<ol>
+<li><a href="#1-概述">概述</a></li>
+<li><a href="#2-训练配置体系">训练配置体系</a></li>
+<li><a href="#3-train-主函数流程">train() 主函数流程</a></li>
+<li><a href="#4-训练循环update<em>policy">训练循环：update</em>policy()</a></li>
+<li><a href="#5-数据加载与采样">数据加载与采样</a></li>
+<li><a href="#6-处理器管道">处理器管道</a></li>
+<li><a href="#7-检查点保存与恢复">检查点保存与恢复</a></li>
+<li><a href="#8-ra-bc-加权训练">RA-BC 加权训练</a></li>
+<li><a href="#9-分布式训练支持">分布式训练支持</a></li>
+</ol>
+
+<hr>
+
+<h2 id="1-概述">1. 概述</h2>
+
+<p><code>lerobot_train</code> 使用离线数据集训练模仿学习策略（如 ACT、Diffusion Policy 等）。它通过 HuggingFace Accelerate 实现多 GPU 分布式训练，支持检查点保存/恢复，并可选择在仿真环境中定期评估。</p>
+
+<hr>
+
+<h2 id="2-训练配置体系">2. 训练配置体系</h2>
+
+<h3 id="21-trainpipelineconfig">2.1 <code>TrainPipelineConfig</code></h3>
+
+<p><strong>文件</strong>: <code>src/lerobot/configs/train.py</code></p>
+
+<pre><code>@dataclass
+class TrainPipelineConfig:
+    dataset: DatasetConfig            # 数据集配置
+    env: EnvConfig | None = None      # 仿真环境配置 (可选，仅用于评估)
+    policy: PreTrainedConfig | None   # 策略配置
+
+    # 输出与恢复
+    output_dir: Path | None = None    # 输出目录
+    job_name: str | None = None       # 任务名称
+    resume: bool = False              # 是否恢复训练
+
+    # 训练超参数
+    seed: int | None = 1000           # 随机种子
+    cudnn_deterministic: bool = False # 是否使用确定性 cuDNN
+    num_workers: int = 4              # DataLoader 工作进程数
+    batch_size: int = 8               # 每 GPU 的 batch size
+    steps: int = 100_000              # 总训练步数
+    eval_freq: int = 20_000           # 评估频率
+    log_freq: int = 200               # 日志频率
+    tolerance_s: float = 1e-4         # 时间戳容差
+
+    # 检查点
+    save_checkpoint: bool = True
+    save_freq: int = 40_000           # 保存频率
+
+    # 优化器/调度器
+    use_policy_training_preset: bool = True  # 使用策略预设
+    optimizer: OptimizerConfig | None = None
+    scheduler: LRSchedulerConfig | None = None
+
+    # 评估
+    eval: EvalConfig                  # 评估配置
+    wandb: WandBConfig               # Weights &amp; Biases 配置
+    peft: PeftConfig | None = None   # PEFT/LoRA 配置
+
+    # RA-BC
+    use_rabc: bool = False            # 启用奖励加权
+    rabc_progress_path: str | None    # SARM 进度文件路径
+    rabc_kappa: float = 0.01          # 硬阈值
+    rabc_epsilon: float = 1e-6        # 数值稳定性
+    rabc_head_mode: str = &quot;sparse&quot;    # &quot;sparse&quot; 或 &quot;dense&quot;</code></pre>
+
+<h3 id="22-optimizer-配置">2.2 Optimizer 配置</h3>
+
+<pre><code># 策略预设 (DiffusionPolicy):
+AdamConfig(lr=1e-4, betas=(0.95, 0.999), weight_decay=1e-6, grad_clip_norm=10.0)
+
+# 策略预设 (ACTPolicy):
+AdamWConfig(lr=1e-5, weight_decay=1e-4)
+
+# 用户自定义时可以覆盖这些预设</code></pre>
+
+<h3 id="23-scheduler-配置">2.3 Scheduler 配置</h3>
+
+<pre><code># DiffusionPolicy:  Cosine with 500 warmup steps
+DiffuserSchedulerConfig(name=&quot;cosine&quot;, num_warmup_steps=500)
+
+# ACTPolicy:  None (不使用学习率调度)</code></pre>
+
+<hr>
+
+<h2 id="3-train-主函数流程">3. train() 主函数流程</h2>
+
+<p><strong>文件</strong>: <code>src/lerobot/scripts/lerobot_train.py:154-546</code></p>
+
+<pre><code>@parser.wrap()
+def train(cfg: TrainPipelineConfig, accelerator: Accelerator | None = None):
+    # ======== 阶段 1: 配置验证 ========
+    cfg.validate()
+
+    # ======== 阶段 2: 创建 Accelerator ========
+    if accelerator is None:
+        ddp_kwargs = DistributedDataParallelKwargs(find_unused_parameters=True)
+        accelerator = Accelerator(
+            step_scheduler_with_optimizer=False,  # 手动控制 scheduler 步进
+            kwargs_handlers=[ddp_kwargs],
+            cpu=cfg.policy.device == &quot;cpu&quot;,
+        )
+
+    init_logging(accelerator=accelerator)
+    is_main_process = accelerator.is_main_process
+
+    # ======== 阶段 3: WandB 初始化 ========
+    if cfg.wandb.enable and is_main_process:
+        wandb_logger = WandBLogger(cfg)
+
+    # ======== 阶段 4: 随机种子 ========
+    if cfg.seed is not None:
+        set_seed(cfg.seed, accelerator=accelerator)
+
+    # ======== 阶段 5: 设备与性能配置 ========
+    device = accelerator.device
+    torch.backends.cudnn.benchmark = True
+    torch.backends.cuda.matmul.allow_tf32 = True
+
+    # ======== 阶段 6: 创建数据集 ========
+    # 主进程先加载 (避免多进程竞争下载)
+    if is_main_process:
+        dataset = make_dataset(cfg)
+    accelerator.wait_for_everyone()
+    if not is_main_process:
+        dataset = make_dataset(cfg)
+
+    # ======== 阶段 7: 创建评估环境 (可选) ========
+    eval_env = None
+    if cfg.eval_freq &gt; 0 and cfg.env is not None and is_main_process:
+        eval_env = make_env(cfg.env, n_envs=cfg.eval.batch_size)
+
+    # ======== 阶段 8: 创建策略 ========
+    policy = make_policy(
+        cfg=cfg.policy,
+        ds_meta=dataset.meta,     # 用于推断 input/output features
+        rename_map=cfg.rename_map,
+    )
+
+    # ======== 阶段 8b: PEFT 包装 (可选) ========
+    if cfg.peft is not None:
+        policy = policy.wrap_with_peft(peft_cli_overrides=dataclasses.asdict(cfg.peft))
+
+    accelerator.wait_for_everyone()
+
+    # ======== 阶段 9: 创建处理器 ========
+    preprocessor, postprocessor = make_pre_post_processors(
+        policy_cfg=cfg.policy,
+        pretrained_path=cfg.policy.pretrained_path,
+        dataset_stats=dataset.meta.stats,
+        ...
+    )
+
+    # ======== 阶段 10: 创建优化器和调度器 ========
+    optimizer, lr_scheduler = make_optimizer_and_scheduler(cfg, policy)
+
+    # ======== 阶段 10b: RA-BC 权重提供者 (可选) ========
+    rabc_weights = None
+    if cfg.use_rabc:
+        rabc_weights = RABCWeights(
+            progress_path=cfg.rabc_progress_path,
+            chunk_size=policy.config.chunk_size,
+            ...
+        )
+
+    # ======== 阶段 11: 恢复检查点 (可选) ========
+    step = 0
+    if cfg.resume:
+        step, optimizer, lr_scheduler = load_training_state(
+            cfg.checkpoint_path, optimizer, lr_scheduler
+        )
+
+    # ======== 阶段 12: 创建 DataLoader ========
+    if hasattr(cfg.policy, &quot;drop_n_last_frames&quot;):
+        # DP 训练: 使用 EpisodeAwareSampler
+        sampler = EpisodeAwareSampler(
+            dataset.meta.episodes[&quot;dataset_from_index&quot;],
+            dataset.meta.episodes[&quot;dataset_to_index&quot;],
+            drop_n_last_frames=cfg.policy.drop_n_last_frames,
+            shuffle=True,
+        )
+        shuffle = False  # sampler 自己处理随机性
+    else:
+        shuffle = True
+        sampler = None
+
+    dataloader = DataLoader(
+        dataset,
+        num_workers=cfg.num_workers,
+        batch_size=cfg.batch_size,
+        shuffle=shuffle,
+        sampler=sampler,
+        pin_memory=(device.type == &quot;cuda&quot;),
+        prefetch_factor=2,
+    )
+
+    # ======== 阶段 13: Accelerator.prepare ========
+    policy, optimizer, dataloader, lr_scheduler = accelerator.prepare(
+        policy, optimizer, dataloader, lr_scheduler
+    )
+    dl_iter = cycle(dataloader)  # 循环迭代器
+
+    # ======== 阶段 14: 训练循环 ========
+    for _ in range(step, cfg.steps):
+        start_time = time.perf_counter()
+
+        # 获取 batch + 预处理
+        batch = next(dl_iter)
+        batch = preprocessor(batch)
+        # preprocessor: RenameObs → ToBatch → Device → Normalize
+
+        # 单步更新
+        train_tracker, output_dict = update_policy(
+            train_tracker, policy, batch, optimizer,
+            cfg.optimizer.grad_clip_norm,
+            accelerator=accelerator,
+            lr_scheduler=lr_scheduler,
+            rabc_weights_provider=rabc_weights,
+        )
+
+        step += 1
+
+        # 日志
+        if step % cfg.log_freq == 0:
+            logging.info(train_tracker)
+            wandb_logger.log_dict(...)
+
+        # 检查点
+        if cfg.save_checkpoint and step % cfg.save_freq == 0:
+            save_checkpoint(checkpoint_dir, step, cfg, policy, ...)
+            update_last_checkpoint(checkpoint_dir)
+
+        # 评估
+        if cfg.env and step % cfg.eval_freq == 0:
+            eval_info = eval_policy_all(eval_env, policy, ...)
+
+    # ======== 阶段 15: 推送模型到 Hub ========
+    if is_main_process and cfg.policy.push_to_hub:
+        unwrapped_policy.push_model_to_hub(cfg)
+
+    accelerator.end_training()</code></pre>
+
+<hr>
+
+<h2 id="4-训练循环update_policy">4. 训练循环：update_policy()</h2>
+
+<p><strong>文件</strong>: <code>src/lerobot/scripts/lerobot_train.py:59-150</code></p>
+
+<pre><code>def update_policy(train_metrics, policy, batch, optimizer, grad_clip_norm,
+                  accelerator, lr_scheduler, lock, rabc_weights_provider):
+    start_time = time.perf_counter()
+    policy.train()
+
+    # === RA-BC 样本加权 (可选) ===
+    if rabc_weights_provider is not None:
+        rabc_batch_weights, rabc_batch_stats = rabc_weights_provider.compute_batch_weights(batch)
+
+    # === 前向传播 (混合精度) ===
+    with accelerator.autocast():
+        if rabc_batch_weights is not None:
+            # 逐样本损失 + 加权
+            per_sample_loss, output_dict = policy.forward(batch, reduction=&quot;none&quot;)
+            epsilon = 1e-6
+            loss = (per_sample_loss * rabc_batch_weights).sum() / (rabc_batch_weights.sum() + epsilon)
+        else:
+            loss, output_dict = policy.forward(batch)
+
+    # === 反向传播 ===
+    accelerator.backward(loss)
+
+    # === 梯度裁剪 ===
+    if grad_clip_norm &gt; 0:
+        grad_norm = accelerator.clip_grad_norm_(policy.parameters(), grad_clip_norm)
+    else:
+        grad_norm = torch.nn.utils.clip_grad_norm_(policy.parameters(), float(&quot;inf&quot;))
+
+    # === 优化器步进 ===
+    with lock if lock else nullcontext():
+        optimizer.step()
+    optimizer.zero_grad()
+
+    # === 学习率调度器步进 ===
+    if lr_scheduler is not None:
+        lr_scheduler.step()
+
+    # === 策略内部更新 (如 EMA 目标网络) ===
+    if has_method(unwrapped_policy, &quot;update&quot;):
+        unwrapped_policy.update()
+
+    # === 记录指标 ===
+    train_metrics.loss = loss.item()
+    train_metrics.grad_norm = grad_norm.item()
+    train_metrics.lr = optimizer.param_groups[0][&quot;lr&quot;]
+    train_metrics.update_s = time.perf_counter() - start_time
+    return train_metrics, output_dict</code></pre>
+
+<hr>
+
+<h2 id="5-数据加载与采样">5. 数据加载与采样</h2>
+
+<h3 id="51-make_dataset-工厂">5.1 make_dataset 工厂</h3>
+
+<pre><code>def make_dataset(cfg):
+    # 创建 ImageTransforms (如果启用)
+    image_transforms = ImageTransforms(cfg.dataset.image_transforms)
+
+    if cfg.dataset.streaming:
+        return StreamingLeRobotDataset(
+            cfg.dataset.repo_id,
+            root=cfg.dataset.root,
+            delta_timestamps=resolve_delta_timestamps(cfg.policy, ds_meta),
+            ...
+        )
+    else:
+        return LeRobotDataset(
+            cfg.dataset.repo_id,
+            root=cfg.dataset.root,
+            image_transforms=image_transforms,
+            delta_timestamps=resolve_delta_timestamps(cfg.policy, ds_meta),
+            ...
+        )</code></pre>
+
+<h3 id="52-episodeawaresampler">5.2 EpisodeAwareSampler</h3>
+
+<p>用于 Diffusion Policy 训练的专用采样器：</p>
+
+<pre><code>class EpisodeAwareSampler:
+    def __init__(self, dataset_from_indices, dataset_to_indices,
+                 drop_n_first_frames=0, drop_n_last_frames=0, shuffle=False):
+        &quot;&quot;&quot;
+        构建每个 episode 的有效帧范围:
+          start = dataset_from_index + drop_n_first_frames
+          end   = dataset_to_index - drop_n_last_frames
+
+        drop_n_last_frames 丢弃 episode 末尾被 padding 填充的不完整帧
+        &quot;&quot;&quot;
+        self.valid_indices = []
+        for ep_start, ep_end in zip(dataset_from_indices, dataset_to_indices):
+            valid_start = ep_start + drop_n_first_frames
+            valid_end = ep_end - drop_n_last_frames
+            if valid_end &gt; valid_start:
+                self.valid_indices.extend(range(valid_start, valid_end))</code></pre>
+
+<h3 id="53-delta-timestamps-解析">5.3 Delta Timestamps 解析</h3>
+
+<pre><code>def resolve_delta_timestamps(cfg, ds_meta):
+    &quot;&quot;&quot;将策略的 delta_indices 转换为时间戳偏移&quot;&quot;&quot;
+    delta_timestamps = {}
+    if cfg.reward_delta_indices:
+        delta_timestamps[&quot;next.reward&quot;] = [i/ds_meta.fps for i in cfg.reward_delta_indices]
+    if cfg.action_delta_indices:
+        delta_timestamps[&quot;action&quot;] = [i/ds_meta.fps for i in cfg.action_delta_indices]
+    # observation_delta_indices 在 dataset.__getitem__ 中自动处理
+    return delta_timestamps</code></pre>
+
+<hr>
+
+<h2 id="6-处理器管道">6. 处理器管道</h2>
+
+<h3 id="61-预处理器-policy-preprocessor">6.1 预处理器 (Policy Preprocessor)</h3>
+
+<pre><code>输入: batch dict from DataLoader
+  │
+  ├── RenameObservationsProcessorStep
+  │     └── 根据 rename_map 重命名观察键
+  │
+  ├── [TactileValidationProcessorStep]  (可选)
+  │     └── 验证触觉数据形状
+  │
+  ├── AddBatchDimensionProcessorStep
+  │     └── 为标量数据添加 batch 维度
+  │
+  ├── DeviceProcessorStep
+  │     └── 将张量移动到指定设备 (cuda/cpu)
+  │
+  └── NormalizerProcessorStep
+        └── 使用数据集统计量归一化:
+            MEAN_STD: (x - mean) / std
+            MIN_MAX:  2 * (x - min) / (max - min) - 1
+            QUANTILES: (x - q01) / (q99 - q01) * 2 - 1</code></pre>
+
+<h3 id="62-后处理器-policy-postprocessor">6.2 后处理器 (Policy Postprocessor)</h3>
+
+<pre><code>输入: policy output (normalized actions)
+  │
+  ├── UnnormalizerProcessorStep
+  │     └── 反归一化:
+            MEAN_STD: x * std + mean
+            MIN_MAX:  (x + 1) / 2 * (max - min) + min
+  │
+  └── DeviceProcessorStep (CPU)
+        └── 移回 CPU</code></pre>
+
+<h3 id="63-归一化统计量保存">6.3 归一化统计量保存</h3>
+
+<pre><code># 保存到 checkpoint:
+policy_preprocessor_step_3_normalizer_processor.safetensors
+
+# 包含的张量:
+{
+    &quot;observation.state_mean&quot;: Tensor([6], float32),
+    &quot;observation.state_std&quot;:  Tensor([6], float32),
+    &quot;observation.state_min&quot;:  Tensor([6], float32),
+    &quot;observation.state_max&quot;:  Tensor([6], float32),
+    &quot;observation.images.front_mean&quot;: Tensor([3,1,1], float32),
+    &quot;observation.images.front_std&quot;:  Tensor([3,1,1], float32),
+    ...
+    &quot;action_mean&quot;: Tensor([6], float32),
+    &quot;action_std&quot;:  Tensor([6], float32),
+    &quot;action_min&quot;:  Tensor([6], float32),
+    &quot;action_max&quot;:  Tensor([6], float32),
+}</code></pre>
+
+<hr>
+
+<h2 id="7-检查点保存与恢复">7. 检查点保存与恢复</h2>
+
+<h3 id="71-保存格式">7.1 保存格式</h3>
+
+<pre><code>outputs/train/&lt;job_name&gt;/checkpoints/&lt;step&gt;/
+├── pretrained_model/
+│   ├── config.json               # 策略配置
+│   ├── model.safetensors         # 模型权重
+│   ├── train_config.json         # 训练配置
+│   ├── policy_preprocessor.json  # 预处理器管道配置
+│   ├── policy_preprocessor_step_3_normalizer_processor.safetensors
+│   ├── policy_postprocessor.json
+│   └── policy_postprocessor_step_0_unnormalizer_processor.safetensors
+│
+└── training_state/
+    ├── training_step.json                  # {&quot;step&quot;: 40000}
+    ├── optimizer_param_groups.json         # 优化器参数组
+    ├── optimizer_state.safetensors         # Adam moments
+    ├── rng_state.safetensors               # 随机状态
+    └── scheduler_state.json                # 调度器状态</code></pre>
+
+<h3 id="72-保存函数">7.2 保存函数</h3>
+
+<pre><code>def save_checkpoint(checkpoint_dir, step, cfg, policy, optimizer,
+                    scheduler, preprocessor, postprocessor):
+    pretrained_dir = checkpoint_dir / &quot;pretrained_model&quot;
+    training_dir = checkpoint_dir / &quot;training_state&quot;
+
+    # 1. 保存模型
+    policy.save_pretrained(pretrained_dir)
+    cfg.save_pretrained(pretrained_dir)  # → train_config.json
+
+    # 2. 保存处理器
+    preprocessor.save_pretrained(pretrained_dir)
+    postprocessor.save_pretrained(pretrained_dir)
+
+    # 3. 保存训练状态
+    save_optimizer_state(optimizer, training_dir)
+    save_scheduler_state(scheduler, training_dir)
+    save_rng_state(training_dir)
+    write_json({&quot;step&quot;: step}, training_dir / &quot;training_step.json&quot;)</code></pre>
+
+<h3 id="73-恢复函数">7.3 恢复函数</h3>
+
+<pre><code>def load_training_state(checkpoint_path, optimizer, lr_scheduler):
+    training_dir = checkpoint_path / &quot;training_state&quot;
+
+    step = load_json(training_dir / &quot;training_step.json&quot;)[&quot;step&quot;]
+    load_optimizer_state(optimizer, training_dir)
+    load_scheduler_state(lr_scheduler, training_dir)
+    load_rng_state(training_dir)
+
+    return step, optimizer, lr_scheduler</code></pre>
+
+<hr>
+
+<h2 id="8-ra-bc-加权训练">8. RA-BC 加权训练</h2>
+
+<p><strong>文件</strong>: <code>src/lerobot/utils/rabc.py</code></p>
+
+<h3 id="81-原理">8.1 原理</h3>
+
+<p>RA-BC（Reward-Aligned Behavior Cloning）使用预计算的 SARM 进度评分来对训练样本进行加权。高质量过渡 → 高权重，低质量过渡 → 低权重。</p>
+
+<h3 id="82-训练时集成">8.2 训练时集成</h3>
+
+<pre><code># 在 update_policy() 中:
+if rabc_weights_provider is not None:
+    # 1. 获取逐样本权重
+    rabc_batch_weights = rabc_weights_provider.compute_batch_weights(batch)
+    # weights 已归一化到 sum = batch_size
+
+    # 2. 获取逐样本损失
+    per_sample_loss, output_dict = policy.forward(batch, reduction=&quot;none&quot;)
+
+    # 3. 加权损失
+    # L_RA-BC = Σ(w_i * l_i) / (Σw_i + ε)
+    loss = (per_sample_loss * rabc_batch_weights).sum() / (rabc_batch_weights.sum() + epsilon)</code></pre>
+
+<h3 id="83-权重计算">8.3 权重计算</h3>
+
+<pre><code>class RABCWeights:
+    def compute_batch_weights(self, batch):
+        # 1. 根据 batch 中的 episode_index + frame_index 查询预计算的进度
+        progress_scores = self._lookup_progress(batch)
+
+        # 2. 计算权重
+        # delta_i = |progress_i - median_progress|
+        # weight_i = 1 / (delta_i + epsilon) if delta_i &gt; kappa else 1.0
+        # 归一化: weight_i *= batch_size / sum(weights)</code></pre>
+
+<hr>
+
+<h2 id="9-分布式训练支持">9. 分布式训练支持</h2>
+
+<h3 id="91-huggingface-accelerate">9.1 HuggingFace Accelerate</h3>
+
+<pre><code># 自动检测硬件: CPU, 单GPU, 多GPU (DDP), MPS
+accelerator = Accelerator(
+    step_scheduler_with_optimizer=False,
+    kwargs_handlers=[DistributedDataParallelKwargs(find_unused_parameters=True)],
+    cpu=cfg.policy.device == &quot;cpu&quot;,
+)
+
+# prepare 自动处理:
+# - 模型包装为 DistributedDataParallel
+# - DataLoader 变为分布式采样
+# - 优化器状态在进程间同步
+policy, optimizer, dataloader, lr_scheduler = accelerator.prepare(
+    policy, optimizer, dataloader, lr_scheduler
+)</code></pre>
+
+<h3 id="92-有效-batch-size">9.2 有效 Batch Size</h3>
+
+<pre><code>effective_bs = cfg.batch_size * accelerator.num_processes
+# 例如: batch_size=16, 4 GPUs → effective_bs=64</code></pre>
+
+<h3 id="93-主进程控制">9.3 主进程控制</h3>
+
+<pre><code>is_main_process = accelerator.is_main_process
+
+# 只在主进程:
+if is_main_process:
+    logging.info(...)       # 避免重复日志
+    wandb_logger.log(...)   # 单点日志
+    save_checkpoint(...)    # 单点保存
+
+# 全局同步:
+accelerator.wait_for_everyone()  # 确保所有进程同步</code></pre>
+
+<hr>
+
+<h2 id="附录关键文件索引">附录：关键文件索引</h2>
+
+<table>
+<thead><tr>
+<th style="text-align:left">功能</th>
+<th style="text-align:left">文件</th>
+</tr></thead>
+<tbody>
+<tr>
+<td style="text-align:left">训练入口</td>
+<td style="text-align:left"><code>src/lerobot/scripts/lerobot_train.py</code></td>
+</tr>
+<tr>
+<td style="text-align:left">训练配置</td>
+<td style="text-align:left"><code>src/lerobot/configs/train.py</code> — <code>TrainPipelineConfig</code></td>
+</tr>
+<tr>
+<td style="text-align:left">优化器工厂</td>
+<td style="text-align:left"><code>src/lerobot/optim/factory.py</code> — <code>make<em>optimizer</em>and_scheduler</code></td>
+</tr>
+<tr>
+<td style="text-align:left">优化器配置</td>
+<td style="text-align:left"><code>src/lerobot/optim/optimizers.py</code> — <code>AdamConfig</code>, <code>AdamWConfig</code></td>
+</tr>
+<tr>
+<td style="text-align:left">调度器配置</td>
+<td style="text-align:left"><code>src/lerobot/optim/schedulers.py</code> — <code>DiffuserSchedulerConfig</code></td>
+</tr>
+<tr>
+<td style="text-align:left">数据集工厂</td>
+<td style="text-align:left"><code>src/lerobot/datasets/factory.py</code> — <code>make_dataset</code></td>
+</tr>
+<tr>
+<td style="text-align:left">采样器</td>
+<td style="text-align:left"><code>src/lerobot/datasets/sampler.py</code> — <code>EpisodeAwareSampler</code></td>
+</tr>
+<tr>
+<td style="text-align:left">图像增强</td>
+<td style="text-align:left"><code>src/lerobot/datasets/transforms.py</code> — <code>ImageTransforms</code></td>
+</tr>
+<tr>
+<td style="text-align:left">策略工厂</td>
+<td style="text-align:left"><code>src/lerobot/policies/factory.py</code> — <code>make<em>policy</code>, <code>make</em>pre<em>post</em>processors</code></td>
+</tr>
+<tr>
+<td style="text-align:left">训练工具</td>
+<td style="text-align:left"><code>src/lerobot/utils/train<em>utils.py</code> — <code>save</em>checkpoint</code>, <code>load<em>training</em>state</code></td>
+</tr>
+<tr>
+<td style="text-align:left">RA-BC 权重</td>
+<td style="text-align:left"><code>src/lerobot/utils/rabc.py</code> — <code>RABCWeights</code></td>
+</tr>
+<tr>
+<td style="text-align:left">WandB 日志</td>
+<td style="text-align:left"><code>src/lerobot/rl/wandb_utils.py</code> — <code>WandBLogger</code></td>
+</tr>
+<tr>
+<td style="text-align:left">评估脚本</td>
+<td style="text-align:left"><code>src/lerobot/scripts/lerobot<em>eval.py</code> — <code>eval</em>policy_all</code></td>
+</tr>
+</tbody></table>
+
+</body>
+</html>

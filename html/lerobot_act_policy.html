@@ -1,0 +1,867 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ACT (Action Chunking Transformer) 在 LeRobot 框架中的具体实现</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    line-height: 1.7; color: #24292e; background: #fff;
+    max-width: 800px; margin: 0 auto; padding: 16px;
+    font-size: 16px;
+}
+h1 { font-size: 1.8em; border-bottom: 2px solid #e1e4e8; padding-bottom: 0.3em; margin: 24px 0 16px; }
+h2 { font-size: 1.45em; border-bottom: 1px solid #e1e4e8; padding-bottom: 0.3em; margin: 24px 0 16px; }
+h3 { font-size: 1.25em; margin: 24px 0 16px; }
+h4 { font-size: 1.1em; margin: 24px 0 16px; }
+p { margin: 0 0 16px; }
+a { color: #0366d6; text-decoration: none; }
+a:hover { text-decoration: underline; }
+code {
+    background: #f6f8fa; padding: 2px 6px; border-radius: 4px;
+    font-family: 'SF Mono', 'Fira Code', monospace; font-size: 0.9em;
+}
+pre {
+    background: #f6f8fa; padding: 16px; border-radius: 6px;
+    overflow-x: auto; margin: 0 0 16px; line-height: 1.45;
+}
+pre code { background: none; padding: 0; }
+blockquote {
+    border-left: 4px solid #dfe2e5; padding: 0 16px; color: #6a737d; margin: 0 0 16px;
+}
+table { border-collapse: collapse; width: 100%; margin: 0 0 16px; }
+th, td { border: 1px solid #dfe2e5; padding: 8px 12px; text-align: left; }
+th { background: #f6f8fa; font-weight: 600; }
+tr:nth-child(even) { background: #f6f8fa; }
+ul, ol { padding-left: 2em; margin: 0 0 16px; }
+li { margin: 4px 0; }
+img { max-width: 100%; }
+hr { border: none; border-top: 1px solid #e1e4e8; margin: 24px 0; }
+strong { font-weight: 600; }
+.index-list { list-style: none; padding: 0; }
+.index-list li { margin: 12px 0; padding: 12px 16px; background: #f6f8fa; border-radius: 8px; }
+.index-list a { font-size: 1.1em; font-weight: 500; }
+.back-link { display: inline-block; margin-bottom: 16px; color: #586069; font-size: 0.9em; }
+</style>
+</head>
+<body>
+<a class="back-link" href="index.html">← 返回索引</a>
+<h1 id="act-action-chunking-transformer-在-lerobot-框架中的具体实现">ACT (Action Chunking Transformer) 在 LeRobot 框架中的具体实现</h1>
+
+<blockquote>基于 <code>src/lerobot/policies/act/</code> 源码的深度解析</blockquote>
+
+<hr>
+
+<h2 id="目录">目录</h2>
+
+<ol>
+<li><a href="#1-概述">概述</a></li>
+<li><a href="#2-文件结构">文件结构</a></li>
+<li><a href="#3-配置类actconfig">配置类：ACTConfig</a></li>
+<li><a href="#4-策略类actpolicy">策略类：ACTPolicy</a></li>
+<li><a href="#5-底层神经网络act">底层神经网络：ACT</a></li>
+<li><a href="#6-transformer-encoderdecoder-内部实现">Transformer Encoder/Decoder 内部实现</a></li>
+<li><a href="#7-时序集成器acttemporalensembler">时序集成器：ACTTemporalEnsembler</a></li>
+<li><a href="#8-触觉传感器集成">触觉传感器集成</a></li>
+<li><a href="#9-数据处理与训练流程">数据处理与训练流程</a></li>
+<li><a href="#10-推理流程">推理流程</a></li>
+<li><a href="#11-act-网络架构图">ACT 网络架构图</a></li>
+</ol>
+
+<hr>
+
+<h2 id="1-概述">1. 概述</h2>
+
+<p>ACT (Action Chunking Transformer) 来自论文 <em>Learning Fine-Grained Bimanual Manipulation with Low-Cost Hardware</em> (https://huggingface.co/papers/2304.13705)。</p>
+
+<p><strong>核心思想</strong>：将动作预测建模为一个序列生成问题——给定当前观察，Transformer Encoder-Decoder 一次性生成一个 &quot;chunk&quot;（默认 100 步）的未来动作。训练时通过 VAE 对动作序列进行压缩编码，推理时从潜在空间直接解码出动作序列。</p>
+
+<table>
+<thead><tr>
+<th style="text-align:left">特性</th>
+<th style="text-align:left">ACT</th>
+</tr></thead>
+<tbody>
+<tr>
+<td style="text-align:left"><strong>动作预测方式</strong></td>
+<td style="text-align:left">单步 Transformer 解码，一次性输出整体 chunk</td>
+</tr>
+<tr>
+<td style="text-align:left"><strong>核心网络</strong></td>
+<td style="text-align:left">Transformer Encoder-Decoder + 可选 VAE</td>
+</tr>
+<tr>
+<td style="text-align:left"><strong>观察步数</strong></td>
+<td style="text-align:left"><code>n<em>obs</em>steps=1</code> (仅当前帧)</td>
+</tr>
+<tr>
+<td style="text-align:left"><strong>动作 Horizon</strong></td>
+<td style="text-align:left"><code>chunk_size=100</code> (100步动作预测)</td>
+</tr>
+<tr>
+<td style="text-align:left"><strong>执行步数</strong></td>
+<td style="text-align:left"><code>n<em>action</em>steps=100</code> (=chunk_size)</td>
+</tr>
+<tr>
+<td style="text-align:left"><strong>训练目标</strong></td>
+<td style="text-align:left">L1 重建损失 + KL 散度 (VAE)</td>
+</tr>
+<tr>
+<td style="text-align:left"><strong>推理机制</strong></td>
+<td style="text-align:left">单次前向传播，输出动作 chunk</td>
+</tr>
+<tr>
+<td style="text-align:left"><strong>时序集成</strong></td>
+<td style="text-align:left">可选 Temporal Ensemble (指数加权)</td>
+</tr>
+<tr>
+<td style="text-align:left"><strong>位置编码</strong></td>
+<td style="text-align:left">学习式 1D 嵌入 + 正弦 2D 空间编码</td>
+</tr>
+<tr>
+<td style="text-align:left"><strong>优化器</strong></td>
+<td style="text-align:left">AdamW, lr=1e-5, weight_decay=1e-4</td>
+</tr>
+<tr>
+<td style="text-align:left"><strong>学习率调度</strong></td>
+<td style="text-align:left">无 (None)</td>
+</tr>
+<tr>
+<td style="text-align:left"><strong>图像预处理</strong></td>
+<td style="text-align:left">无 resize/crop (使用原始分辨率)</td>
+</tr>
+</tbody></table>
+
+<hr>
+
+<h2 id="2-文件结构">2. 文件结构</h2>
+
+<pre><code>src/lerobot/policies/act/
+├── __init__.py
+├── configuration_act.py    # ACTConfig 配置类
+└── modeling_act.py         # ACTPolicy + ACT 网络 + ACTEncoder/Decoder + ACTTemporalEnsembler</code></pre>
+
+<hr>
+
+<h2 id="3-配置类actconfig">3. 配置类：ACTConfig</h2>
+
+<p><strong>文件</strong>: <code>src/lerobot/policies/act/configuration_act.py:24-198</code></p>
+
+<pre><code>@PreTrainedConfig.register_subclass(&quot;act&quot;)
+@dataclass
+class ACTConfig(PreTrainedConfig):
+    # === 输入/输出结构 ===
+    n_obs_steps: int = 1         # 仅使用当前帧的观察
+    chunk_size: int = 100         # 动作预测 chunk 大小 (一次预测100步)
+    n_action_steps: int = 100     # 实际执行的动作步数 (= chunk_size)
+
+    # === 归一化映射 ===
+    normalization_mapping: dict = {
+        &quot;VISUAL&quot;: NormalizationMode.MEAN_STD,    # 图像：均值-标准差归一化
+        &quot;STATE&quot;: NormalizationMode.MEAN_STD,     # 状态：均值-标准差
+        &quot;ACTION&quot;: NormalizationMode.MEAN_STD,    # 动作：均值-标准差
+        &quot;TACTILE&quot;: NormalizationMode.MEAN_STD,   # 触觉：均值-标准差
+    }
+
+    # === 视觉骨干网络 ===
+    vision_backbone: str = &quot;resnet18&quot;
+    pretrained_backbone_weights: str = &quot;ResNet18_Weights.IMAGENET1K_V1&quot;
+    replace_final_stride_with_dilation: bool = False  # 保持空间分辨率
+
+    # === Transformer 架构 ===
+    pre_norm: bool = False       # 不使用 pre-norm (使用 post-norm)
+    dim_model: int = 512         # Transformer 隐藏维度
+    n_heads: int = 8             # 多头注意力头数
+    dim_feedforward: int = 3200  # FFN 扩展维度
+    feedforward_activation: str = &quot;relu&quot;
+    n_encoder_layers: int = 4    # Encoder 层数
+    n_decoder_layers: int = 1    # Decoder 层数 (原版为7但有bug只用1层)
+
+    # === VAE (Variational Auto-Encoder) ===
+    use_vae: bool = True         # 使用 VAE 进行动作编码
+    latent_dim: int = 32         # 潜在空间维度
+    n_vae_encoder_layers: int = 4
+
+    # === 推理 ===
+    temporal_ensemble_coeff: float | None = None  # 时序集成系数
+
+    # === 触觉传感器 ===
+    use_tactile: bool = False
+    tactile_encoder_type: str = &quot;cnn&quot;    # &quot;cnn&quot; 或 &quot;attention&quot;
+    tactile_input_shape: tuple = (12, 32)
+    tactile_dropout: float = 0.3
+    tactile_features: list[str] | None = None
+    n_tactile_tokens: int = 1            # 每个传感器产生的 token 数
+
+    # === 训练参数 ===
+    dropout: float = 0.1
+    kl_weight: float = 10.0              # KL 散度损失权重
+    optimizer_lr: float = 1e-5
+    optimizer_weight_decay: float = 1e-4
+    optimizer_lr_backbone: float = 1e-5  # 骨干网络学习率 (与主lr相同)</code></pre>
+
+<h3 id="关键设计决策">关键设计决策</h3>
+
+<ol>
+<li><strong><code>n<em>obs</em>steps=1</code></strong>：ACT 只使用当前帧的观察，不使用历史帧。这意味着 <code>observation<em>delta</em>indices</code> 返回 <code>None</code>。</li>
+</ol>
+
+<ol>
+<li><strong><code>n<em>decoder</em>layers=1</code></strong>：尽管原始论文使用了 7 层 Decoder，但由于 <a href="https://github.com/tonyzhaozh/act/issues/25#issue-2258740521">bug</a>，实际上只有第一层有梯度更新。LeRobot 保留了原始行为。</li>
+</ol>
+
+<ol>
+<li><strong><code>chunk<em>size=100</code> 且 <code>n</em>action_steps=100</code></strong>：ACT 一次性生成 100 步动作并全部执行。</li>
+</ol>
+
+<ol>
+<li><strong>不使用 <code>frame_stride</code></strong>：ACT 处理每一帧，不进行时序子采样。</li>
+</ol>
+
+<hr>
+
+<h2 id="4-策略类actpolicy">4. 策略类：ACTPolicy</h2>
+
+<p><strong>文件</strong>: <code>src/lerobot/policies/act/modeling_act.py:42-163</code></p>
+
+<pre><code>class ACTPolicy(PreTrainedPolicy):
+    config_class = ACTConfig
+    name = &quot;act&quot;
+
+    def __init__(self, config: ACTConfig, **kwargs):
+        super().__init__(config)
+        config.validate_features()
+        self.model = ACT(config)           # 底层 ACT 神经网络
+
+        if config.temporal_ensemble_coeff is not None:
+            self.temporal_ensembler = ACTTemporalEnsembler(
+                config.temporal_ensemble_coeff, config.chunk_size
+            )
+        self.reset()</code></pre>
+
+<h3 id="41-select_action-动作选择">4.1 <code>select_action</code> — 动作选择</h3>
+
+<pre><code>@torch.no_grad()
+def select_action(self, batch: dict[str, Tensor]) -&gt; Tensor:
+    self.eval()
+
+    # 模式 1: 时序集成 (temporal ensembling)
+    if self.config.temporal_ensemble_coeff is not None:
+        actions = self.predict_action_chunk(batch)          # (B, chunk_size, action_dim)
+        action = self.temporal_ensembler.update(actions)     # 加权平均
+        return action
+
+    # 模式 2: 动作队列 (默认)
+    if len(self._action_queue) == 0:
+        # 队列为空时，从模型获取新动作 chunk
+        actions = self.predict_action_chunk(batch)
+        actions = actions[:, :self.config.n_action_steps]
+        # 转置后入队: (chunk_size, B, action_dim)
+        self._action_queue.extend(actions.transpose(0, 1))
+    return self._action_queue.popleft()</code></pre>
+
+<h3 id="42-predict_action_chunk-预测动作块">4.2 <code>predict<em>action</em>chunk</code> — 预测动作块</h3>
+
+<pre><code>@torch.no_grad()
+def predict_action_chunk(self, batch: dict[str, Tensor]) -&gt; Tensor:
+    self.eval()
+    if self.config.image_features:
+        batch = dict(batch)
+        batch[OBS_IMAGES] = [batch[key] for key in self.config.image_features]
+    actions = self.model(batch)[0]    # 只取动作，不要 (mu, log_sigma)
+    return actions                     # (B, chunk_size, action_dim)</code></pre>
+
+<h3 id="43-forward-训练前向传播">4.3 <code>forward</code> — 训练前向传播</h3>
+
+<pre><code>def forward(self, batch: dict[str, Tensor]) -&gt; tuple[Tensor, dict]:
+    if self.config.image_features:
+        batch = dict(batch)
+        batch[OBS_IMAGES] = [batch[key] for key in self.config.image_features]
+
+    # 模型前向：返回动作和 VAE 潜在参数
+    actions_hat, (mu_hat, log_sigma_x2_hat) = self.model(batch)
+
+    # L1 重建损失，忽略 padding 位置
+    l1_loss = (
+        F.l1_loss(batch[ACTION], actions_hat, reduction=&quot;none&quot;)
+        * ~batch[&quot;action_is_pad&quot;].unsqueeze(-1)
+    ).mean()
+
+    loss_dict = {&quot;l1_loss&quot;: l1_loss.item()}
+
+    if self.config.use_vae:
+        # KL 散度: D_KL(q(z|x) || p(z))，p(z) = N(0, I)
+        mean_kld = (
+            (-0.5 * (1 + log_sigma_x2_hat - mu_hat.pow(2)
+                     - (log_sigma_x2_hat).exp()))
+            .sum(-1).mean()
+        )
+        loss_dict[&quot;kld_loss&quot;] = mean_kld.item()
+        loss = l1_loss + mean_kld * self.config.kl_weight  # kl_weight=10.0
+    else:
+        loss = l1_loss
+
+    return loss, loss_dict</code></pre>
+
+<p><strong>损失函数</strong>：<code>L = L1(actions_hat, actions) + 10.0 × KL(N(μ,σ²) || N(0,I))</code></p>
+
+<hr>
+
+<h2 id="5-底层神经网络act">5. 底层神经网络：ACT</h2>
+
+<p><strong>文件</strong>: <code>src/lerobot/policies/act/modeling_act.py:257-545</code></p>
+
+<h3 id="51-整体架构图">5.1 整体架构图</h3>
+
+<pre><code>                              inputs: images + robot_state [+ tactile]
+                                    │
+                          ┌─────────┼─────────┐
+                          │         │         │
+                     [ResNet]   [Linear]  [TactileTokenEncoder]
+                     backbone   proj       (CNN + TokenProj)
+                          │         │         │
+                    feature_map  state_emb  tactile_tokens
+                          │         │         │
+                          └────┬────┘─────────┘
+                               │
+                    ┌──────────▼──────────┐
+                    │  Transformer Encoder │
+                    │  (4 layers, 512 dim) │
+                    │  + Pos Embeddings    │
+                    └──────────┬──────────┘
+                               │
+                    ┌──────────▼──────────┐
+         latent ───►│  Transformer Decoder │
+                    │  (1 layer)           │
+                    │  cross-attn to enc   │
+                    └──────────┬──────────┘
+                               │
+                    ┌──────────▼──────────┐
+                    │   Action Head        │
+                    │   Linear(512, 6)     │
+                    └──────────┬──────────┘
+                               │
+                       actions: (B, 100, 6)
+
+         ===== VAE Encoder (训练时) =====
+         [CLS, robot_state, *actions] ──► ACTEncoder(4 layers)
+              └──► mu, log_sigma ──► latent_sample (reparameterization)</code></pre>
+
+<h3 id="52-__init__-详细代码路径">5.2 <code><strong>init</strong></code> 详细代码路径</h3>
+
+<pre><code>class ACT(nn.Module):
+    def __init__(self, config: ACTConfig):
+        super().__init__()
+        self.config = config
+
+        # === 1. VAE Encoder (可选) ===
+        if self.config.use_vae:
+            # BERT-style VAE encoder: [cls_token, *robot_state, *action_sequence]
+            self.vae_encoder = ACTEncoder(config, is_vae_encoder=True)
+            self.vae_encoder_cls_embed = nn.Embedding(1, config.dim_model)
+
+            # 输入投影
+            if self.config.robot_state_feature:
+                self.vae_encoder_robot_state_input_proj = nn.Linear(state_dim, config.dim_model)
+            self.vae_encoder_action_input_proj = nn.Linear(action_dim, config.dim_model)
+
+            # 潜在空间投影: 输出 mean 和 log_variance
+            self.vae_encoder_latent_output_proj = nn.Linear(config.dim_model, config.latent_dim * 2)
+
+            # 固定正弦位置编码
+            num_input_tokens = 1 + (1 if robot_state else 0) + config.chunk_size
+            self.register_buffer(
+                &quot;vae_encoder_pos_enc&quot;,
+                create_sinusoidal_pos_embedding(num_input_tokens, dim_model)
+            )
+
+        # === 2. 视觉骨干网络 ===
+        if self.config.image_features:
+            backbone_model = getattr(torchvision.models, config.vision_backbone)(
+                replace_stride_with_dilation=[False, False, config.replace_final_stride_with_dilation],
+                weights=config.pretrained_backbone_weights,
+                norm_layer=FrozenBatchNorm2d,   # 固定 BatchNorm 参数
+            )
+            self.backbone = IntermediateLayerGetter(
+                backbone_model, return_layers={&quot;layer4&quot;: &quot;feature_map&quot;}
+            )
+
+        # === 3. 触觉编码器 ===
+        if self.config.use_tactile:
+            self.tactile_encoder = TactileTokenEncoder(
+                encoder_type=config.tactile_encoder_type,
+                input_shape=config.tactile_input_shape,
+                feature_dim=config.dim_model,     # 直接输出 dim_model 维度
+                n_tokens=config.n_tactile_tokens,
+                dropout=config.tactile_dropout,
+            )
+
+        # === 4. Transformer Encoder + Decoder ===
+        self.encoder = ACTEncoder(config)     # 4 层 TransformerEncoder
+        self.decoder = ACTDecoder(config)     # 1 层 TransformerDecoder
+
+        # Encoder 输入投影
+        self.encoder_latent_input_proj = nn.Linear(latent_dim, dim_model)
+        if robot_state:
+            self.encoder_robot_state_input_proj = nn.Linear(state_dim, dim_model)
+        if env_state:
+            self.encoder_env_state_input_proj = nn.Linear(env_dim, dim_model)
+        if image_features:
+            self.encoder_img_feat_input_proj = nn.Conv2d(backbone_fc_in_features, dim_model, kernel_size=1)
+
+        # 位置编码
+        # 1D tokens: [latent, robot_state, env_state, tactile_tokens...]
+        n_1d_tokens = 1 + has_robot_state + has_env_state + n_tactile_tokens
+        self.encoder_1d_feature_pos_embed = nn.Embedding(n_1d_tokens, dim_model)
+        # 2D 正弦位置编码用于图像特征图的每个像素
+        if image_features:
+            self.encoder_cam_feat_pos_embed = ACTSinusoidalPositionEmbedding2d(dim_model // 2)
+
+        # Decoder 位置编码 (学习式, chunk_size 个)
+        self.decoder_pos_embed = nn.Embedding(chunk_size, dim_model)
+
+        # === 5. 动作输出头 ===
+        self.action_head = nn.Linear(dim_model, action_dim)
+
+        self._reset_parameters()  # Xavier uniform 初始化</code></pre>
+
+<h3 id="53-forward-详细数据流">5.3 <code>forward</code> 详细数据流</h3>
+
+<pre><code>def forward(self, batch) -&gt; tuple[Tensor, tuple[Tensor, Tensor]]:
+    &quot;&quot;&quot;
+    输入:                           输出:
+      OBS_STATE:   (B, state_dim)          actions:  (B, chunk_size, action_dim)
+      OBS_IMAGES:  list[(B, C, H, W)]      (mu, log_sigma_x2): VAE 潜在参数
+      OBS_TACTILE: (B, H_tact, W_tact)
+      ACTION:      (B, chunk_size, action_dim)  # 训练时存在
+      action_is_pad: (B, chunk_size)
+    &quot;&quot;&quot;
+
+    # === 第1步: VAE 编码 (仅训练时) ===
+    if use_vae and ACTION in batch and self.training:
+        cls_embed = repeat(vae_encoder_cls_embed, &quot;1 d -&gt; b 1 d&quot;, b=B)
+        robot_state_embed = vae_encoder_robot_state_input_proj(OBS_STATE).unsqueeze(1)
+        action_embed = vae_encoder_action_input_proj(ACTION)
+
+        vae_input = torch.cat([cls_embed, robot_state_embed, action_embed], dim=1)
+        # (B, 1+1+chunk_size, dim_model)
+
+        key_padding_mask = torch.cat([
+            torch.full((B, 2), False),      # CLS 和 robot_state 都不是 padding
+            batch[&quot;action_is_pad&quot;]
+        ], dim=1)
+
+        cls_token_out = self.vae_encoder(
+            vae_input.permute(1, 0, 2),      # (seq, B, dim)
+            pos_embed=vae_encoder_pos_enc.permute(1, 0, 2),
+            key_padding_mask=key_padding_mask,
+        )[0]  # 取 CLS token: (B, dim_model)
+
+        latent_pdf = vae_encoder_latent_output_proj(cls_token_out)
+        mu = latent_pdf[:, :latent_dim]
+        log_sigma_x2 = latent_pdf[:, latent_dim:]
+        latent_sample = mu + (log_sigma_x2 / 2).exp() * randn_like(mu)  # 重参数化
+    else:
+        mu = log_sigma_x2 = None
+        latent_sample = zeros(B, latent_dim)  # 推理时 latent 为全零
+
+    # === 第2步: 组装 Encoder 输入 ===
+    encoder_in_tokens = [encoder_latent_input_proj(latent_sample)]
+    encoder_in_pos_embed = list(encoder_1d_feature_pos_embed.weight.unsqueeze(1))
+
+    if robot_state:
+        encoder_in_tokens.append(encoder_robot_state_input_proj(OBS_STATE))
+    if env_state:
+        encoder_in_tokens.append(encoder_env_state_input_proj(OBS_ENV_STATE))
+    if use_tactile:
+        for tactile_key in tactile_keys:
+            tactile_tokens = self.tactile_encoder(batch[tactile_key])  # (B, n_tokens, dim_model)
+            for i in range(n_tactile_tokens):
+                encoder_in_tokens.append(tactile_tokens[:, i])
+
+    if image_features:
+        for img in OBS_IMAGES:
+            cam_features = self.backbone(img)[&quot;feature_map&quot;]         # ResNet 提取
+            cam_pos_embed = self.encoder_cam_feat_pos_embed(cam_features)  # 2D 正弦编码
+            cam_features = self.encoder_img_feat_input_proj(cam_features)  # 1x1 卷积投影
+            # 展平空间维度: (B, dim_model, H, W) → (H*W, B, dim_model)
+            cam_features = einops.rearrange(cam_features, &quot;b c h w -&gt; (h w) b c&quot;)
+            cam_pos_embed = einops.rearrange(cam_pos_embed, &quot;b c h w -&gt; (h w) b c&quot;)
+            encoder_in_tokens.extend(list(cam_features))
+            encoder_in_pos_embed.extend(list(cam_pos_embed))
+
+    encoder_in_tokens = torch.stack(encoder_in_tokens, dim=0)       # (total_tokens, B, dim)
+    encoder_in_pos_embed = torch.stack(encoder_in_pos_embed, dim=0)
+
+    # === 第3步: Transformer Encoder ===
+    encoder_out = self.encoder(encoder_in_tokens, pos_embed=encoder_in_pos_embed)
+
+    # === 第4步: Transformer Decoder ===
+    decoder_in = torch.zeros(chunk_size, B, dim_model)              # 全零 tokens
+    decoder_out = self.decoder(
+        decoder_in, encoder_out,
+        encoder_pos_embed=encoder_in_pos_embed,
+        decoder_pos_embed=self.decoder_pos_embed.weight.unsqueeze(1),
+    )
+
+    # === 第5步: 动作预测 ===
+    decoder_out = decoder_out.transpose(0, 1)  # (B, chunk_size, dim)
+    actions = self.action_head(decoder_out)     # (B, chunk_size, action_dim)
+
+    return actions, (mu, log_sigma_x2)</code></pre>
+
+<hr>
+
+<h2 id="6-transformer-encoderdecoder-内部实现">6. Transformer Encoder/Decoder 内部实现</h2>
+
+<h3 id="61-actencoder">6.1 ACTEncoder</h3>
+
+<pre><code>class ACTEncoder(nn.Module):
+    def __init__(self, config, is_vae_encoder=False):
+        n_layers = config.n_vae_encoder_layers if is_vae_encoder else config.n_encoder_layers
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model=config.dim_model,       # 512
+            nhead=config.n_heads,           # 8
+            dim_feedforward=config.dim_feedforward,  # 3200
+            dropout=config.dropout,
+            activation=config.feedforward_activation,  # relu
+            norm_first=config.pre_norm,     # False: post-norm
+            batch_first=False,              # (seq, batch, feature)
+        )
+        self.layers = nn.ModuleList([copy.deepcopy(encoder_layer) for _ in range(n_layers)])
+
+    def forward(self, src, pos_embed=None, key_padding_mask=None):
+        if pos_embed is not None:
+            src = src + pos_embed
+        output = src
+        for layer in self.layers:
+            output = layer(output, src_key_padding_mask=key_padding_mask)
+        return output</code></pre>
+
+<h3 id="62-actdecoder">6.2 ACTDecoder</h3>
+
+<pre><code>class ACTDecoder(nn.Module):
+    def __init__(self, config):
+        decoder_layer = nn.TransformerDecoderLayer(
+            d_model=config.dim_model,
+            nhead=config.n_heads,
+            dim_feedforward=config.dim_feedforward,
+            dropout=config.dropout,
+            activation=config.feedforward_activation,
+            norm_first=config.pre_norm,
+            batch_first=False,
+        )
+        self.layers = nn.ModuleList([copy.deepcopy(decoder_layer) for _ in range(config.n_decoder_layers)])
+
+    def forward(self, tgt, memory, encoder_pos_embed, decoder_pos_embed):
+        tgt = tgt + decoder_pos_embed
+        output = tgt
+        for layer in self.layers:
+            output = layer(output, memory, memory_key_padding_mask=None)
+        return output</code></pre>
+
+<p><strong>关键细节</strong>：</p>
+<ul>
+<li>Encoder 和 VAE Encoder 共享同一个 <code>ACTEncoder</code> 类，通过 <code>is<em>vae</em>encoder</code> 区分层数</li>
+<li>Decoder 使用 <code>batch_first=False</code>（PyTorch 默认的 <code>(seq, batch, feature)</code> 格式）</li>
+<li><code>FrozenBatchNorm2d</code>：训练时冻结 BatchNorm 以保留预训练特征</li>
+</ul>
+
+<hr>
+
+<h2 id="7-时序集成器acttemporalensembler">7. 时序集成器：ACTTemporalEnsembler</h2>
+
+<p><strong>文件</strong>: <code>src/lerobot/policies/act/modeling_act.py:166-254</code></p>
+
+<h3 id="71-数学原理">7.1 数学原理</h3>
+
+<p>对于时间步 t 预测的动作序列的第 i 步动作，使用指数衰减权重：</p>
+
+<p>$$w_i = e^{-\beta \cdot i}$$</p>
+
+<p>默认 $\beta = 0.01$，意味着更旧的预测获得更高权重（平滑化动作）。</p>
+
+<h3 id="72-代码实现">7.2 代码实现</h3>
+
+<pre><code>class ACTTemporalEnsembler:
+    def __init__(self, temporal_ensemble_coeff: float, chunk_size: int):
+        self.chunk_size = chunk_size
+        self.ensemble_weights = torch.exp(-temporal_ensemble_coeff * torch.arange(chunk_size))
+        self.ensemble_weights_cumsum = torch.cumsum(self.ensemble_weights, dim=0)
+        self.reset()
+
+    def reset(self):
+        self.ensembled_actions = None
+        self.ensembled_actions_count = None
+
+    def update(self, actions: Tensor) -&gt; Tensor:
+        &quot;&quot;&quot;actions: (B, chunk_size, action_dim) → 返回: (B, action_dim)&quot;&quot;&quot;
+        if self.ensembled_actions is None:
+            # 第一步：直接初始化
+            self.ensembled_actions = actions.clone()
+            self.ensembled_actions_count = torch.ones((self.chunk_size, 1), dtype=torch.long)
+        else:
+            # 在线加权平均更新前 chunk_size-1 个动作
+            self.ensembled_actions *= self.ensemble_weights_cumsum[self.ensembled_actions_count - 1]
+            self.ensembled_actions += actions[:, :-1] * self.ensemble_weights[self.ensembled_actions_count]
+            self.ensembled_actions /= self.ensemble_weights_cumsum[self.ensembled_actions_count]
+            self.ensembled_actions_count = torch.clamp(self.ensembled_actions_count + 1, max=self.chunk_size)
+            # 最后一个动作直接追加（无历史）
+            self.ensembled_actions = torch.cat([self.ensembled_actions, actions[:, -1:]], dim=1)
+            self.ensembled_actions_count = torch.cat([
+                self.ensembled_actions_count,
+                torch.ones_like(self.ensembled_actions_count[-1:])
+            ])
+
+        # 消费第一个动作
+        action = self.ensembled_actions[:, 0]
+        self.ensembled_actions = self.ensembled_actions[:, 1:]
+        self.ensembled_actions_count = self.ensembled_actions_count[1:]
+        return action</code></pre>
+
+<hr>
+
+<h2 id="8-触觉传感器集成">8. 触觉传感器集成</h2>
+
+<h3 id="81-共享触觉编码器">8.1 共享触觉编码器</h3>
+
+<p><strong>文件</strong>: <code>src/lerobot/policies/tactile/encoder.py</code></p>
+
+<p>两种骨干网络可选：</p>
+
+<p><strong><code>TactileCNN</code></strong> — 基础 CNN：<code>Conv2d → BN → ReLU → MaxPool</code> × 3 → <code>Flatten → FC → Dropout → FC</code></p>
+
+<p><strong><code>TactileAttentionCNN</code></strong> — 带空间注意力：额外添加 <code>Conv2d→ReLU→Conv2d→Sigmoid</code> 注意力门控 + <code>GlobalAvgPool + GlobalMaxPool → Concat → FC</code></p>
+
+<p><strong><code>TactileTokenEncoder</code></strong> — 包装器：选择骨干，可选 <code>Linear(feature<em>dim, n</em>tokens * feature_dim)</code> 投影到多个 token。</p>
+
+<h3 id="82-act-中的触觉集成方式">8.2 ACT 中的触觉集成方式</h3>
+
+<p>在 ACT 中，触觉数据被编码为 Transformer Encoder 的<strong>独立 token，参与自注意力计算</strong>：</p>
+
+<pre><code># 每个触觉传感器 → n_tactile_tokens 个 token (每个 token 维度 = dim_model = 512)
+tactile_tokens = self.tactile_encoder(batch[tactile_key])  # (B, n_tokens, dim_model)
+
+for i in range(n_tactile_tokens):
+    encoder_in_tokens.append(tactile_tokens[:, i])  # 每个 token: (B, dim_model)</code></pre>
+
+<p>触觉 token 与其他 token（latent、robot_state、图像像素）一起有学习式位置编码，通过 Transformer 的自注意力和交叉注意力进行全局交互。</p>
+
+<hr>
+
+<h2 id="9-数据处理与训练流程">9. 数据处理与训练流程</h2>
+
+<h3 id="91-delta-timestamps-配置">9.1 Delta Timestamps 配置</h3>
+
+<pre><code># ACTConfig
+observation_delta_indices = None  # 仅使用当前帧
+action_delta_indices = list(range(chunk_size))  # [0, 1, 2, ..., 99]
+reward_delta_indices = None</code></pre>
+
+<h3 id="92-训练数据加载">9.2 训练数据加载</h3>
+
+<pre><code>DataLoader.__getitem__(idx):
+  → 读取当前帧
+  → action: (chunk_size, action_dim) 从当前帧取未来 100 步
+  → action_is_pad: (chunk_size,) 标记超出 episode 范围的填充位置</code></pre>
+
+<h3 id="93-optimizer-和-scheduler">9.3 Optimizer 和 Scheduler</h3>
+
+<table>
+<thead><tr>
+<th style="text-align:left">参数</th>
+<th style="text-align:left">ACT</th>
+</tr></thead>
+<tbody>
+<tr>
+<td style="text-align:left"><strong>优化器</strong></td>
+<td style="text-align:left"><code>AdamWConfig(lr=1e-5, weight_decay=1e-4)</code></td>
+</tr>
+<tr>
+<td style="text-align:left"><strong>参数分组</strong></td>
+<td style="text-align:left">backbone (lr=1e-5) + 其他 (lr=1e-5)</td>
+</tr>
+<tr>
+<td style="text-align:left"><strong>调度器</strong></td>
+<td style="text-align:left"><code>None</code> (无学习率调度)</td>
+</tr>
+<tr>
+<td style="text-align:left"><strong>梯度裁剪</strong></td>
+<td style="text-align:left">默认 (10.0)</td>
+</tr>
+</tbody></table>
+
+<pre><code>def get_optim_params(self) -&gt; dict:
+    return [
+        {&quot;params&quot;: [p for n, p in self.named_parameters()
+                    if not n.startswith(&quot;model.backbone&quot;) and p.requires_grad]},
+        {&quot;params&quot;: [p for n, p in self.named_parameters()
+                    if n.startswith(&quot;model.backbone&quot;) and p.requires_grad],
+         &quot;lr&quot;: self.config.optimizer_lr_backbone},
+    ]</code></pre>
+
+<hr>
+
+<h2 id="10-推理流程">10. 推理流程</h2>
+
+<pre><code>输入: 当前帧观察
+
+1. 图像: ResNet(FrozenBN) → feature_map → flatten → 位置编码 → tokens
+2. 状态: Linear → token
+3. 触觉: TactileTokenEncoder → token(s)
+4. 潜在向量: zeros(B, 32) (推理时 latent = 0)
+5. Transformer Encoder: 融合所有 tokens → 输出编码表示
+6. Transformer Decoder: 从全零 tokens + 学习式位置编码进行交叉注意力解码
+7. Action Head: Linear(512, 6) → 输出 chunk_size=100 动作
+8. (可选) Temporal Ensemble: 跨时间步的指数加权平均
+9. 执行全部 n_action_steps=100 步动作 (一次性)，或逐步出队</code></pre>
+
+<p><strong>推理特点</strong>：</p>
+<ul>
+<li><strong>速度极快</strong>：仅需单次前向传播</li>
+<li><strong>低频推理</strong>：每 episode 可能只需推理 1 次（如果 episode ≤ 100 步）</li>
+<li><strong>动作一致性</strong>：chunk 内动作平滑（一次生成），跨 chunk 间可能有不连续</li>
+<li><strong>单峰行为</strong>：VAE 高斯潜在空间意味着动作分布为单峰</li>
+</ul>
+
+<hr>
+
+<h2 id="11-act-网络架构图">11. ACT 网络架构图</h2>
+
+<pre><code>┌─────────────────────────────────────────────────────────────────────────────┐
+│                           ACT Inference Pipeline                             │
+│                                                                             │
+│  ┌──────────┐    ┌──────────┐    ┌──────────────────┐                      │
+│  │  Image   │    │  State   │    │     Tactile      │                      │
+│  │ (C,H,W)  │    │  (6,)    │    │    (12, 32)      │                      │
+│  └────┬─────┘    └────┬─────┘    └────────┬─────────┘                      │
+│       │               │                   │                                 │
+│       ▼               ▼                   ▼                                 │
+│  ┌──────────┐    ┌──────────┐    ┌──────────────────┐                      │
+│  │ ResNet18 │    │ Linear   │    │ TactileTokenEnc  │                      │
+│  │ FrozenBN │    │(6→512)   │    │ CNN → (B,1,512)  │                      │
+│  │ layer4   │    └────┬─────┘    └────────┬─────────┘                      │
+│  └────┬─────┘         │                   │                                 │
+│       │               │                   │                                 │
+│  (B,512,H&#x27;,W&#x27;)        │                   │                                 │
+│       │               │                   │                                 │
+│       ▼               │                   │                                 │
+│  ┌──────────┐         │                   │                                 │
+│  │ Conv2d   │         │                   │                                 │
+│  │ 1×1 proj │         │                   │                                 │
+│  │(512→512) │         │                   │                                 │
+│  └────┬─────┘         │                   │                                 │
+│       │               │                   │                                 │
+│  Flatten → (H&#x27;W&#x27;,B,512)                   │                                 │
+│       │               │                   │                                 │
+│       └───────┬───────┴──────────┬────────┘                                 │
+│               │                  │                                          │
+│               ▼                  ▼                                          │
+│  ┌───────────────────────────────────────────────────────┐                  │
+│  │              Encoder Token Sequence                    │                  │
+│  │  [latent(0) | state | tactile_token | img_pixel_0...] │                  │
+│  │  + 1D Learnable PosEmbed + 2D Sinusoidal PosEmbed     │                  │
+│  └───────────────────────────┬───────────────────────────┘                  │
+│                              │                                              │
+│                              ▼                                              │
+│  ┌───────────────────────────────────────────────────────┐                  │
+│  │              Transformer Encoder                       │                  │
+│  │  4 layers × {Self-Attn(8 heads) + FFN(512→3200→512)}  │                  │
+│  │  Post-Norm, ReLU activation                            │                  │
+│  └───────────────────────────┬───────────────────────────┘                  │
+│                              │                                              │
+│                              ▼                                              │
+│  ┌───────────────────────────────────────────────────────┐                  │
+│  │              Transformer Decoder                       │                  │
+│  │  1 layer × {Self-Attn + Cross-Attn(to Enc) + FFN}     │                  │
+│  │  Input: zeros(100, B, 512) + Learnable PosEmbed       │                  │
+│  └───────────────────────────┬───────────────────────────┘                  │
+│                              │                                              │
+│                              ▼                                              │
+│  ┌───────────────────────────────────────────────────────┐                  │
+│  │              Action Head                               │                  │
+│  │  Linear(512, 6) → (B, 100, 6)                         │                  │
+│  └───────────────────────────────────────────────────────┘                  │
+│                                                                             │
+│  =========================== Training Only ===========================      │
+│                                                                             │
+│  ┌───────────────────────────────────────────────────────┐                  │
+│  │              VAE Encoder (训练时)                      │                  │
+│  │  Input: [CLS_embed | state_embed | action_seq(100)]    │                  │
+│  │  ACTEncoder(4 layers) → CLS token →                    │                  │
+│  │  Linear(512, 64) → mu(32) + log_sigma_x2(32)          │                  │
+│  │  Reparameterize → latent_sample(32)                    │                  │
+│  │  Loss: KL(N(mu,σ²) || N(0,1)) × 10.0                  │                  │
+│  └───────────────────────────────────────────────────────┘                  │
+│                                                                             │
+│  ┌───────────────────────────────────────────────────────┐                  │
+│  │  Optional: ACTTemporalEnsembler                        │                  │
+│  │  w_i = exp(-β·i), β=0.01                              │                  │
+│  │  Online weighted avg over time steps                   │                  │
+│  └───────────────────────────────────────────────────────┘                  │
+└─────────────────────────────────────────────────────────────────────────────┘</code></pre>
+
+<hr>
+
+<h2 id="附录关键文件索引">附录：关键文件索引</h2>
+
+<table>
+<thead><tr>
+<th style="text-align:left">组件</th>
+<th style="text-align:left">文件</th>
+</tr></thead>
+<tbody>
+<tr>
+<td style="text-align:left">ACTConfig</td>
+<td style="text-align:left"><code>src/lerobot/policies/act/configuration_act.py</code></td>
+</tr>
+<tr>
+<td style="text-align:left">ACTPolicy</td>
+<td style="text-align:left"><code>src/lerobot/policies/act/modeling_act.py:42</code></td>
+</tr>
+<tr>
+<td style="text-align:left">ACT (网络)</td>
+<td style="text-align:left"><code>src/lerobot/policies/act/modeling_act.py:257</code></td>
+</tr>
+<tr>
+<td style="text-align:left">ACTEncoder</td>
+<td style="text-align:left"><code>src/lerobot/policies/act/modeling_act.py:548</code></td>
+</tr>
+<tr>
+<td style="text-align:left">ACTDecoder</td>
+<td style="text-align:left"><code>src/lerobot/policies/act/modeling_act.py:585</code></td>
+</tr>
+<tr>
+<td style="text-align:left">ACTTemporalEnsembler</td>
+<td style="text-align:left"><code>src/lerobot/policies/act/modeling_act.py:166</code></td>
+</tr>
+<tr>
+<td style="text-align:left">TactileTokenEncoder</td>
+<td style="text-align:left"><code>src/lerobot/policies/tactile/encoder.py:115</code></td>
+</tr>
+<tr>
+<td style="text-align:left">TactileCNN</td>
+<td style="text-align:left"><code>src/lerobot/policies/tactile/encoder.py:27</code></td>
+</tr>
+<tr>
+<td style="text-align:left">TactileAttentionCNN</td>
+<td style="text-align:left"><code>src/lerobot/policies/tactile/encoder.py:65</code></td>
+</tr>
+<tr>
+<td style="text-align:left">PreTrainedPolicy</td>
+<td style="text-align:left"><code>src/lerobot/policies/pretrained.py</code></td>
+</tr>
+<tr>
+<td style="text-align:left">PreTrainedConfig</td>
+<td style="text-align:left"><code>src/lerobot/configs/policies.py</code></td>
+</tr>
+<tr>
+<td style="text-align:left">EpisodeAwareSampler</td>
+<td style="text-align:left"><code>src/lerobot/datasets/sampler.py</code></td>
+</tr>
+</tbody></table>
+
+</body>
+</html>

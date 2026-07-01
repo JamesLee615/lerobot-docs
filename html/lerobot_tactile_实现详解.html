@@ -1,0 +1,1129 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>LeRobot 触觉集成实现详解</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    line-height: 1.7; color: #24292e; background: #fff;
+    max-width: 800px; margin: 0 auto; padding: 16px;
+    font-size: 16px;
+}
+h1 { font-size: 1.8em; border-bottom: 2px solid #e1e4e8; padding-bottom: 0.3em; margin: 24px 0 16px; }
+h2 { font-size: 1.45em; border-bottom: 1px solid #e1e4e8; padding-bottom: 0.3em; margin: 24px 0 16px; }
+h3 { font-size: 1.25em; margin: 24px 0 16px; }
+h4 { font-size: 1.1em; margin: 24px 0 16px; }
+p { margin: 0 0 16px; }
+a { color: #0366d6; text-decoration: none; }
+a:hover { text-decoration: underline; }
+code {
+    background: #f6f8fa; padding: 2px 6px; border-radius: 4px;
+    font-family: 'SF Mono', 'Fira Code', monospace; font-size: 0.9em;
+}
+pre {
+    background: #f6f8fa; padding: 16px; border-radius: 6px;
+    overflow-x: auto; margin: 0 0 16px; line-height: 1.45;
+}
+pre code { background: none; padding: 0; }
+blockquote {
+    border-left: 4px solid #dfe2e5; padding: 0 16px; color: #6a737d; margin: 0 0 16px;
+}
+table { border-collapse: collapse; width: 100%; margin: 0 0 16px; }
+th, td { border: 1px solid #dfe2e5; padding: 8px 12px; text-align: left; }
+th { background: #f6f8fa; font-weight: 600; }
+tr:nth-child(even) { background: #f6f8fa; }
+ul, ol { padding-left: 2em; margin: 0 0 16px; }
+li { margin: 4px 0; }
+img { max-width: 100%; }
+hr { border: none; border-top: 1px solid #e1e4e8; margin: 24px 0; }
+strong { font-weight: 600; }
+.index-list { list-style: none; padding: 0; }
+.index-list li { margin: 12px 0; padding: 12px 16px; background: #f6f8fa; border-radius: 8px; }
+.index-list a { font-size: 1.1em; font-weight: 500; }
+.back-link { display: inline-block; margin-bottom: 16px; color: #586069; font-size: 0.9em; }
+</style>
+</head>
+<body>
+<a class="back-link" href="index.html">← 返回索引</a>
+<h1 id="lerobot-触觉集成实现详解">LeRobot 触觉集成实现详解</h1>
+
+<blockquote>本文档解析 lerobot_tactile 项目如何在 HuggingFace LeRobot 原始框架基础上融入触觉传感器信息，涵盖从底层硬件驱动到上层策略模型训练推理的完整技术链路。</blockquote>
+
+<hr>
+
+<h2 id="目录">目录</h2>
+
+<ol>
+<li><a href="#1-总体架构概览">总体架构概览</a></li>
+<li><a href="#2-触觉传感器硬件层">触觉传感器硬件层</a></li>
+<li><a href="#3-特征类型系统">特征类型系统</a></li>
+<li><a href="#4-机器人层集成">机器人层集成</a></li>
+<li><a href="#5-数据采集与数据集层">数据采集与数据集层</a></li>
+<li><a href="#6-处理器层处理器-pipeline">处理器层（Processor Pipeline）</a></li>
+<li><a href="#7-策略模型层策略">策略模型层（Policy）</a></li>
+<li><a href="#8-训练与评估">训练与评估</a></li>
+<li><a href="#9-数据可视化">数据可视化</a></li>
+<li><a href="#10-远端推理通讯client-server">远端推理通讯（Client-Server）</a></li>
+<li><a href="#11-cli-命令行集成">CLI 命令行集成</a></li>
+<li><a href="#12-完整数据流总结">完整数据流总结</a></li>
+</ol>
+
+<hr>
+
+<h2 id="1-总体架构概览">1. 总体架构概览</h2>
+
+<p>项目的触觉集成在 LeRobot 框架的多个抽象层上进行了扩展，形成了一条完整的数据链路：</p>
+
+<pre><code>┌──────────────────────────────────────────────────────────────────┐
+│                        硬件层 (Hardware)                         │
+│  FlexiTac 触觉传感器 ←→ USB Serial (/dev/ttyUSB0)               │
+│  12×32 电容式触觉阵列                                          │
+└──────────────────────────┬───────────────────────────────────────┘
+                           │
+┌──────────────────────────▼───────────────────────────────────────┐
+│                 传感器驱动层 (sensors/)                           │
+│  TactileSensor — 封装 flexitac.FlexiTacSensor                    │
+│  功能: 连续读取/校准/可视化/EMA滤波                              │
+└──────────────────────────┬───────────────────────────────────────┘
+                           │
+┌──────────────────────────▼───────────────────────────────────────┐
+│                 机器人层 (robots/so_tactile_follower/)            │
+│  SOTactileFollower — 继承 SOFollower + 触觉传感器                │
+│  get_observation() → 返回 observation.tactile.{name}             │
+└──────────────────────────┬───────────────────────────────────────┘
+                           │
+┌──────────────────────────▼───────────────────────────────────────┐
+│                  处理器层 (processor/)                            │
+│  TactileValidationProcessorStep → 格式验证                       │
+│  TactileTemporalFilterProcessorStep → EMA时间滤波                │
+└──────────────────────────┬───────────────────────────────────────┘
+                           │
+┌──────────────────────────▼───────────────────────────────────────┐
+│                 数据集层 (datasets/)                              │
+│  feature_utils.py: FeatureType.TACTILE → dataset features        │
+│  LeRobotDataset: 存储/加载触觉数据帧                             │
+└──────────────────────────┬───────────────────────────────────────┘
+                           │
+┌──────────────────────────▼───────────────────────────────────────┐
+│              策略模型层 (policies/tactile/)                       │
+│  TactileCNN / TactileAttentionCNN                                │
+│  TactileTokenEncoder → 触觉图 → 特征Token                       │
+│  ACT / Diffusion / Pi0.5 / SmolVLA 均可使用                      │
+└──────────────────────────────────────────────────────────────────┘</code></pre>
+
+<h3 id="关键文件索引">关键文件索引</h3>
+
+<table>
+<thead><tr>
+<th style="text-align:left">模块</th>
+<th style="text-align:left">文件路径</th>
+<th style="text-align:left">角色</th>
+</tr></thead>
+<tbody>
+<tr>
+<td style="text-align:left">传感器驱动</td>
+<td style="text-align:left"><a href="src/lerobot/sensors/tactile<em>sensor.py">sensors/tactile</em>sensor.py</a></td>
+<td style="text-align:left">底层硬件封装</td>
+</tr>
+<tr>
+<td style="text-align:left">传感器配置</td>
+<td style="text-align:left"><a href="src/lerobot/sensors/configuration<em>tactile</em>sensor.py">sensors/configuration<em>tactile</em>sensor.py</a></td>
+<td style="text-align:left">传感器参数配置</td>
+</tr>
+<tr>
+<td style="text-align:left">机器人集成</td>
+<td style="text-align:left"><a href="src/lerobot/robots/so<em>tactile</em>follower/so<em>tactile</em>follower.py">robots/so<em>tactile</em>follower/so<em>tactile</em>follower.py</a></td>
+<td style="text-align:left">触觉+机器人融合</td>
+</tr>
+<tr>
+<td style="text-align:left">机器人配置</td>
+<td style="text-align:left"><a href="src/lerobot/robots/so<em>tactile</em>follower/config<em>so</em>tactile<em>follower.py">robots/so</em>tactile<em>follower/config</em>so<em>tactile</em>follower.py</a></td>
+<td style="text-align:left">机器人参数配置</td>
+</tr>
+<tr>
+<td style="text-align:left">特征类型</td>
+<td style="text-align:left"><a href="src/lerobot/configs/types.py">configs/types.py</a></td>
+<td style="text-align:left">FeatureType.TACTILE 定义</td>
+</tr>
+<tr>
+<td style="text-align:left">常量定义</td>
+<td style="text-align:left"><a href="src/lerobot/utils/constants.py">utils/constants.py</a></td>
+<td style="text-align:left">OBS_TACTILE 键名</td>
+</tr>
+<tr>
+<td style="text-align:left">数据处理器</td>
+<td style="text-align:left"><a href="src/lerobot/processor/tactile<em>processor.py">processor/tactile</em>processor.py</a></td>
+<td style="text-align:left">触觉数据验证与滤波</td>
+</tr>
+<tr>
+<td style="text-align:left">列编码器</td>
+<td style="text-align:left"><a href="src/lerobot/policies/tactile/encoder.py">policies/tactile/encoder.py</a></td>
+<td style="text-align:left">CNN/Attention 编码器</td>
+</tr>
+<tr>
+<td style="text-align:left">数据集特征</td>
+<td style="text-align:left"><a href="src/lerobot/datasets/feature<em>utils.py">datasets/feature</em>utils.py</a></td>
+<td style="text-align:left">FeatureType.TACTILE→数据集格式</td>
+</tr>
+<tr>
+<td style="text-align:left">录数据脚本</td>
+<td style="text-align:left"><a href="src/lerobot/scripts/lerobot<em>record.py">scripts/lerobot</em>record.py</a></td>
+<td style="text-align:left">触觉元数据写入</td>
+</tr>
+<tr>
+<td style="text-align:left">触觉可视化</td>
+<td style="text-align:left"><a href="src/lerobot/scripts/lerobot<em>dataset</em>viz<em>tactile.py">scripts/lerobot</em>dataset<em>viz</em>tactile.py</a></td>
+<td style="text-align:left">Rerun 可视化</td>
+</tr>
+<tr>
+<td style="text-align:left">CLI 测试</td>
+<td style="text-align:left"><a href="tests/scripts/test<em>tactile</em>cli<em>parsing.py">tests/scripts/test</em>tactile<em>cli</em>parsing.py</a></td>
+<td style="text-align:left">CLI 参数解析测试</td>
+</tr>
+</tbody></table>
+
+<hr>
+
+<h2 id="2-触觉传感器硬件层">2. 触觉传感器硬件层</h2>
+
+<h3 id="21-tactilesensor-类">2.1 TactileSensor 类</h3>
+
+<p>位于 <a href="src/lerobot/sensors/tactile<em>sensor.py#L43-L274">sensors/tactile</em>sensor.py:43-274</a></p>
+
+<p><code>TactileSensor</code> 是对 <code>flexitac.FlexiTacSensor</code> 的封装，通过 USB 串口与触觉传感器通讯。核心功能：</p>
+
+<h4 id="211-初始化与连接">2.1.1 初始化与连接</h4>
+
+<pre><code>class TactileSensor:
+    def __init__(
+        self,
+        port: str = &quot;/dev/ttyUSB0&quot;,       # USB串口路径
+        baud_rate: int = 2_000_000,       # 波特率（固件定义）
+        shape: tuple[int, int] = (12, 32),# 触觉阵列 (行, 列)
+        baseline: float | None = None,     # 基线值 (None=自动校准)
+        init_frames: int = 30,            # 自动校准采集帧数
+        threshold: float = 25.0,          # 接触检测阈值 (ADC)
+        noise_scale: float = 30.0,        # 低于阈值时的归一化除数
+        temporal_alpha: float = 0.2,      # EMA平滑系数 (0-1)
+        enable_visualization: bool = True, # cv2实时可视化
+    )</code></pre>
+
+<p><strong>连接流程</strong> (<code>connect()</code> → <code>_sensor.open()</code>): 通过 USB 串口打开与 FlexiTac 硬件的连接，设置波特率 2,000,000 bps。</p>
+
+<h4 id="212-连续读取与线程模型">2.1.2 连续读取与线程模型</h4>
+
+<p>传感器采用<strong>后台线程连续读取</strong>模式（<code><em>continuous</em>read_loop</code>），避免主线程阻塞：</p>
+
+<pre><code>主线程                          后台数据线程                可视化进程
+   │                                │                        │
+   ├─ start_continuous_read() ──→   │                        │
+   │                                ├─ read_latest()         │
+   │                                ├─ get_latest_data() ←── │
+   │  get_latest_data() ──→ 返回缓存│                        │
+   │                                ├─ update_visualization()│
+   │                                │   └── mp.Queue ──→    ├─ cv2.imshow()</code></pre>
+
+<ul>
+<li><strong>数据锁</strong> (<code><em>data</em>lock</code>): 线程安全的 <code><em>latest</em>data</code> 访问</li>
+<li><strong>停止事件</strong> (<code><em>stop</em>event</code>): 优雅终止后台线程</li>
+<li><strong>守护线程</strong> (<code>daemon=True</code>): 主进程退出时自动清理</li>
+</ul>
+
+<h4 id="213-校准系统">2.1.3 校准系统</h4>
+
+<p>校准的目的是建立传感器在无接触状态下的<strong>基线值</strong>（baseline），所有读数都是相对于基线的差值。</p>
+
+<pre><code># 自动校准: 采集 init_frames 帧，计算均值作为基线
+sensor = TactileSensor(baseline=None, init_frames=30)  # 自动校准
+
+# 固定基线: 跳过校准，所有像素使用相同基线值
+sensor = TactileSensor(baseline=20.0)  # 固定基线
+
+# 手动校准
+sensor.calibrate(num_samples=30)
+
+# 等待校准完成（阻塞，超时30s）
+sensor.wait_for_calibration(timeout_s=30.0)</code></pre>
+
+<h4 id="214-数据格式">2.1.4 数据格式</h4>
+
+<pre><code># read_data() 返回归一化到 [0.0, 1.0] 的 numpy 数组
+data = sensor.read_data()          # shape: (12, 32), dtype: float32, range: [0, 1]
+latest = sensor.get_latest_data()  # 从线程缓存获取最新数据</code></pre>
+
+<h4 id="215-可视化">2.1.5 可视化</h4>
+
+<p>可视化在<strong>独立子进程</strong>中运行（<code>multiprocessing.Process</code>），通过 <code>mp.Queue</code> 接收帧：</p>
+
+<pre><code># 子进程入口: _visualization_worker()
+# 1. 接收归一化的触觉帧
+# 2. 应用 cv2.COLORMAP_VIRIDIS 伪彩色映射
+# 3. 放大 60× (每个像素 → 60×60 显示块)
+# 4. cv2.imshow() 显示</code></pre>
+
+<p>使用了 EMA 时域滤波（<code><em>temporal</em>filter</code>）平滑可视化帧，系数由 <code>temporal_alpha</code> 控制。</p>
+
+<h4 id="216-上下文管理器">2.1.6 上下文管理器</h4>
+
+<pre><code>with TactileSensor(port=&quot;/dev/ttyUSB0&quot;) as sensor:
+    sensor.start_continuous_read()
+    data = sensor.get_latest_data()
+# 自动调用 disconnect() 清理资源</code></pre>
+
+<h3 id="22-tactilesensorconfig-配置类">2.2 TactileSensorConfig 配置类</h3>
+
+<p>位于 <a href="src/lerobot/sensors/configuration<em>tactile</em>sensor.py#L20-L46">sensors/configuration<em>tactile</em>sensor.py:20-46</a></p>
+
+<pre><code>@dataclass
+class TactileSensorConfig:
+    port: str = &quot;/dev/ttyUSB0&quot;
+    baud_rate: int = 2_000_000
+    shape: tuple[int, int] = (12, 32)
+    baseline: float | None = None      # None=自动校准
+    init_frames: int = 30
+    threshold: float = 25.0
+    noise_scale: float = 30.0
+    temporal_alpha: float = 0.2
+    enable_visualization: bool = True</code></pre>
+
+<p>支持<strong>多传感器命名</strong>配置：</p>
+
+<pre><code># 单传感器
+tactile_sensors = {&quot;primary&quot;: TactileSensorConfig(port=&quot;/dev/ttyUSB0&quot;)}
+
+# 双传感器（如左右手指尖）
+tactile_sensors = {
+    &quot;left&quot;:  TactileSensorConfig(port=&quot;/dev/ttyUSB0&quot;),
+    &quot;right&quot;: TactileSensorConfig(port=&quot;/dev/ttyUSB1&quot;),
+}</code></pre>
+
+<hr>
+
+<h2 id="3-特征类型系统">3. 特征类型系统</h2>
+
+<h3 id="31-featuretypetactile">3.1 FeatureType.TACTILE</h3>
+
+<p>位于 <a href="src/lerobot/configs/types.py#L20-L27">configs/types.py:20-27</a></p>
+
+<p>在原始 LeRobot 的 FeatureType 枚举中新增了 <code>TACTILE</code> 类型：</p>
+
+<pre><code>class FeatureType(str, Enum):
+    STATE = &quot;STATE&quot;       # 关节状态
+    VISUAL = &quot;VISUAL&quot;     # 图像/视频
+    ENV = &quot;ENV&quot;           # 环境状态
+    ACTION = &quot;ACTION&quot;     # 动作
+    REWARD = &quot;REWARD&quot;     # 奖励
+    LANGUAGE = &quot;LANGUAGE&quot; # 语言指令
+    TACTILE = &quot;TACTILE&quot;   # 🆕 触觉传感器</code></pre>
+
+<h3 id="32-policyfeature">3.2 PolicyFeature</h3>
+
+<pre><code>@dataclass
+class PolicyFeature:
+    type: FeatureType    # 特征类别
+    shape: tuple[int, ...]  # 形状，如 (12, 32) 表示 12×32 触觉阵列</code></pre>
+
+<h3 id="33-常量定义">3.3 常量定义</h3>
+
+<p>位于 <a href="src/lerobot/utils/constants.py#L29">utils/constants.py:29</a></p>
+
+<pre><code>OBS_TACTILE = &quot;observation.tactile&quot;  # 触觉观测键名前缀</code></pre>
+
+<p>触觉数据在观测字典中的键名遵循约定：<code>observation.tactile.{sensor_name}</code>，例如：</p>
+<ul>
+<li><code>observation.tactile.primary</code> — 单个传感器</li>
+<li><code>observation.tactile.left</code> / <code>observation.tactile.right</code> — 双传感器</li>
+</ul>
+
+<hr>
+
+<h2 id="4-机器人层集成">4. 机器人层集成</h2>
+
+<h3 id="41-sotactilefollower-类">4.1 SOTactileFollower 类</h3>
+
+<p>位于 <a href="src/lerobot/robots/so<em>tactile</em>follower/so<em>tactile</em>follower.py#L31-L131">robots/so<em>tactile</em>follower/so<em>tactile</em>follower.py:31-131</a></p>
+
+<p><code>SOTactileFollower</code> <strong>直接继承</strong> <code>SOFollower</code>，通过覆写关键方法在标准 SO 机械臂控制流中插入触觉数据：</p>
+
+<pre><code>class SOTactileFollower(SOFollower):
+    config_class = SOTactileFollowerConfig
+    name = &quot;so_tactile_follower&quot;</code></pre>
+
+<h4 id="411-初始化流程-__init__">4.1.1 初始化流程 (<strong>init</strong>)</h4>
+
+<pre><code>super().__init__(config)          # 初始化 SOFollower (电机总线 + 摄像头)
+    │
+    ├── for name, sensor_cfg in config.tactile_sensors.items():
+    │       ├── TactileSensor(port, baud, shape, ...)  # 创建传感器实例
+    │       └── sensor.start_continuous_read()         # 启动后台读取线程
+    │
+    └── self._tactile_sensors: dict[str, TactileSensor]</code></pre>
+
+<h4 id="412-get_observation-获取观测">4.1.2 get_observation() — 获取观测</h4>
+
+<p>覆写了 <code>SOFollower.get_observation()</code>，在原有观测基础上追加触觉数据：</p>
+
+<pre><code>def get_observation(self) -&gt; dict[str, Any]:
+    observation = super().get_observation()  # 获得电机位置 + 摄像头图像
+
+    for name, sensor in self._tactile_sensors.items():
+        obs_key = f&quot;{OBS_TACTILE}.{name}&quot;       # e.g. &quot;observation.tactile.primary&quot;
+        data = sensor.get_latest_data()          # (12, 32) float32 array
+
+        if data is None:  # 容错：传感器无数据时填充零
+            data = np.zeros(sensor_cfg.shape, dtype=np.float32)
+
+        observation[obs_key] = data
+
+    return observation</code></pre>
+
+<h4 id="413-observation_features-特征声明">4.1.3 observation_features — 特征声明</h4>
+
+<p>声明触觉传感器的观测特征元数据，供数据集和策略使用：</p>
+
+<pre><code>@property
+def observation_features(self) -&gt; dict[str, PolicyFeature]:
+    features = super().observation_features
+
+    for name, sensor_cfg in self.config.tactile_sensors.items():
+        features[f&quot;{OBS_TACTILE}.{name}&quot;] = PolicyFeature(
+            type=FeatureType.TACTILE,          # 🔑 标记为 TACTILE 类型
+            shape=sensor_cfg.shape,            # (12, 32)
+        )
+
+    return features</code></pre>
+
+<h4 id="414-校准同步">4.1.4 校准同步</h4>
+
+<p>为数据采集提供阻塞等待接口，确保基线已就绪：</p>
+
+<pre><code>def wait_for_tactile_calibration(self, timeout_s: float = 30.0) -&gt; dict[str, bool]:
+    return {name: sensor.wait_for_calibration(timeout_s=timeout_s)
+            for name, sensor in self._tactile_sensors.items()}</code></pre>
+
+<h4 id="415-元数据导出">4.1.5 元数据导出</h4>
+
+<p>将传感器配置和校准基线写入数据集 <code>info.json</code>，使得归一化参数可复现：</p>
+
+<pre><code>def tactile_sensor_metadata(self) -&gt; dict[str, dict]:
+    return {name: sensor.metadata() for name, sensor in self._tactile_sensors.items()}
+    # 每传感器返回: {port, baud_rate, rows, cols, threshold, noise_scale, baseline, ...}</code></pre>
+
+<h4 id="416-资源清理">4.1.6 资源清理</h4>
+
+<pre><code>def disconnect(self):
+    for name, sensor in self._tactile_sensors.items():
+        sensor.disconnect()          # 停止读取线程 → 关闭可视化 → 关闭串口
+    super().disconnect()             # 断开电机总线和摄像头</code></pre>
+
+<h3 id="42-sotactilefollowerconfig-配置类">4.2 SOTactileFollowerConfig 配置类</h3>
+
+<p>位于 <a href="src/lerobot/robots/so<em>tactile</em>follower/config<em>so</em>tactile<em>follower.py#L25-L52">robots/so</em>tactile<em>follower/config</em>so<em>tactile</em>follower.py:25-52</a></p>
+
+<pre><code>@RobotConfig.register_subclass(&quot;so_tactile_follower&quot;)
+@dataclass
+class SOTactileFollowerConfig(RobotConfig):
+    port: str                                            # 电机总线端口
+    disable_torque_on_disconnect: bool = True
+    max_relative_target: float | dict[str, float] | None = None
+    cameras: dict[str, CameraConfig] = field(default_factory=dict)
+    use_degrees: bool = False
+    # 🆕 触觉传感器配置
+    tactile_sensors: dict[str, TactileSensorConfig] = field(default_factory=dict)</code></pre>
+
+<p>通过 <code>RobotConfig.register<em>subclass(&quot;so</em>tactile<em>follower&quot;)</code> 注册到 draccus 选择系统中，CLI 可通过 <code>--robot.type=so</em>tactile_follower</code> 选择。</p>
+
+<h3 id="43-与原始-sofollower-的对比">4.3 与原始 SOFollower 的对比</h3>
+
+<table>
+<thead><tr>
+<th style="text-align:left">特性</th>
+<th style="text-align:left">SOFollower</th>
+<th style="text-align:left">SOTactileFollower</th>
+</tr></thead>
+<tbody>
+<tr>
+<td style="text-align:left">电机控制</td>
+<td style="text-align:left">✅</td>
+<td style="text-align:left">✅ (继承)</td>
+</tr>
+<tr>
+<td style="text-align:left">摄像头</td>
+<td style="text-align:left">✅</td>
+<td style="text-align:left">✅ (继承)</td>
+</tr>
+<tr>
+<td style="text-align:left">触觉传感器</td>
+<td style="text-align:left">❌</td>
+<td style="text-align:left">✅ (新增)</td>
+</tr>
+<tr>
+<td style="text-align:left">observation_features</td>
+<td style="text-align:left">关节 + 摄像头</td>
+<td style="text-align:left">关节 + 摄像头 + <strong>触觉</strong></td>
+</tr>
+<tr>
+<td style="text-align:left">get_observation()</td>
+<td style="text-align:left">关节值 + 图像</td>
+<td style="text-align:left">关节值 + 图像 + <strong>触觉帧</strong></td>
+</tr>
+<tr>
+<td style="text-align:left">校准</td>
+<td style="text-align:left">电机校准</td>
+<td style="text-align:left">电机 + <strong>触觉基线校准</strong></td>
+</tr>
+<tr>
+<td style="text-align:left">disconnect</td>
+<td style="text-align:left">释放电机/摄像头</td>
+<td style="text-align:left">释放电机/摄像头/ <strong>触觉传感器</strong></td>
+</tr>
+</tbody></table>
+
+<hr>
+
+<h2 id="5-数据采集与数据集层">5. 数据采集与数据集层</h2>
+
+<h3 id="51-数据采集流程-lerobot_recordpy">5.1 数据采集流程 (lerobot_record.py)</h3>
+
+<p>位于 <a href="src/lerobot/scripts/lerobot<em>record.py">scripts/lerobot</em>record.py</a></p>
+
+<h4 id="511-触觉元数据写入">5.1.1 触觉元数据写入</h4>
+
+<p>在录制开始时，记录脚本检测 robot 是否包含触觉传感器，若有则将校准信息写入 <code>info.json</code>：</p>
+
+<pre><code># lerobot_record.py:530-543
+if hasattr(robot, &quot;tactile_sensor_metadata&quot;):
+    timeout_s = cfg.dataset.tactile_calibration_timeout_s
+    if hasattr(robot, &quot;wait_for_tactile_calibration&quot;):
+        for name, calibrated in robot.wait_for_tactile_calibration(timeout_s=timeout_s).items():
+            if not calibrated:
+                logging.warning(f&quot;Tactile sensor &#x27;{name}&#x27; not calibrated after {timeout_s:.0f}s&quot;)
+    tactile_meta = robot.tactile_sensor_metadata()
+    if tactile_meta:
+        dataset.meta.info[&quot;tactile_sensors&quot;] = tactile_meta  # 写入 info.json
+        write_info(dataset.meta.info, dataset.meta.root)</code></pre>
+
+<p>最终 <code>info.json</code> 中会包含：</p>
+
+<pre><code>{
+  &quot;tactile_sensors&quot;: {
+    &quot;primary&quot;: {
+      &quot;port&quot;: &quot;/dev/ttyUSB0&quot;,
+      &quot;baud_rate&quot;: 2000000,
+      &quot;rows&quot;: 12,
+      &quot;cols&quot;: 32,
+      &quot;threshold&quot;: 25.0,
+      &quot;noise_scale&quot;: 30.0,
+      &quot;is_calibrated&quot;: true,
+      &quot;baseline&quot;: [20.5, 21.3, ...]  // 12×32 的基线值数组
+    }
+  }
+}</code></pre>
+
+<h4 id="512-配置参数">5.1.2 配置参数</h4>
+
+<pre><code>@dataclass
+class DatasetRecordConfig:
+    # ... 其他参数 ...
+    tactile_calibration_timeout_s: float = 30.0  # 触觉校准超时</code></pre>
+
+<h4 id="513-数据帧采集">5.1.3 数据帧采集</h4>
+
+<p>主循环中每一帧通过 <code>robot.get<em>observation()</code> 获取包含触觉的完整观测，然后通过 <code>build</em>dataset_frame()</code> 转换为数据集格式。</p>
+
+<h3 id="52-数据集特征转换">5.2 数据集特征转换</h3>
+
+<p>位于 <a href="src/lerobot/datasets/feature<em>utils.py">datasets/feature</em>utils.py</a></p>
+
+<h4 id="521-hw_to_dataset_features-硬件特征数据集特征">5.2.1 hw<em>to</em>dataset_features() — 硬件特征→数据集特征</h4>
+
+<p>这是将机器人硬件特征（类型/形状）转换为 LeRobot 数据集格式的核心函数：</p>
+
+<pre><code># feature_utils.py:88-154
+def hw_to_dataset_features(hw_features, prefix, use_video=True):
+    features = {}
+
+    # 1. 分类：关节(flat) vs 摄像头(tuple) vs 触觉(PolicyFeature with TACTILE type)
+    joint_fts = {k: v for k, v in hw_features.items()
+                 if v is float or (isinstance(v, PolicyFeature) and
+                    v.type not in (FeatureType.VISUAL, FeatureType.TACTILE))}
+    cam_fts = {k: v for k, v in hw_features.items() if isinstance(v, tuple)}
+    tactile_fts = {k: v for k, v in hw_features.items()
+                   if isinstance(v, PolicyFeature) and v.type == FeatureType.TACTILE}
+
+    # 2. 处理关节特征 → observation.state / action
+    # 3. 处理摄像头 → observation.images.{name}
+    # 4. 处理触觉 → observation.tactile.{name}
+    for key, pf in tactile_fts.items():
+        dim_names = [&quot;height&quot;, &quot;width&quot;] if len(pf.shape) == 2 else [...]
+        # 避免重复前缀：如果 key 已经是 &quot;observation.tactile.primary&quot; 则不再加前缀
+        feature_key = key if key.startswith(f&quot;{prefix}.&quot;) else f&quot;{prefix}.tactile.{key}&quot;
+        features[feature_key] = {
+            &quot;dtype&quot;: &quot;float32&quot;,
+            &quot;shape&quot;: pf.shape,      # (12, 32)
+            &quot;names&quot;: dim_names,     # [&quot;height&quot;, &quot;width&quot;]
+        }
+
+    return features</code></pre>
+
+<p><strong>关键设计</strong>：触觉数据以 <code>float32</code> 类型、2D 形状 <code>(12, 32)</code> 存储在数据集中，用 <code>names: [&quot;height&quot;, &quot;width&quot;]</code> 标注维度含义。这与图像（3D shape + video/image dtype）和关节状态（1D shape + float32 dtype）形成对比。</p>
+
+<h4 id="522-dataset_to_policy_features-数据集特征策略特征">5.2.2 dataset<em>to</em>policy_features() — 数据集特征→策略特征</h4>
+
+<pre><code># feature_utils.py:188-231
+def dataset_to_policy_features(features):
+    policy_features = {}
+    for key, ft in features.items():
+        shape = ft[&quot;shape&quot;]
+        if ft[&quot;dtype&quot;] in [&quot;image&quot;, &quot;video&quot;]:
+            type = FeatureType.VISUAL
+        elif key.startswith(OBS_STR):
+            type = FeatureType.STATE    # 默认归类为 STATE
+        # ...其他逻辑...
+
+        policy_features[key] = PolicyFeature(type=type, shape=shape)
+
+    return policy_features</code></pre>
+
+<p><strong>注意</strong>：当前 <code>dataset<em>to</em>policy<em>features()</code> 未显式检测 TACTILE 类型；触觉特征在从数据集加载时会被归类为 STATE。策略配置中通过 <code>use</em>tactile</code> 和 <code>tactile<em>features</code> 列表显式指定哪些键需要作为触觉处理，ACT 配置中的 <code>validate</em>features()</code> 方法确保检测到触觉键时不依赖图像或环境状态。</p>
+
+<h4 id="523-build_dataset_frame-构建数据帧">5.2.3 build<em>dataset</em>frame() — 构建数据帧</h4>
+
+<pre><code># feature_utils.py:157-185
+def build_dataset_frame(ds_features, values, prefix):
+    frame = {}
+    for key, ft in ds_features.items():
+        if ft[&quot;dtype&quot;] == &quot;float32&quot; and len(ft[&quot;shape&quot;]) == 1:
+            frame[key] = np.array([values[name] for name in ft[&quot;names&quot;]])
+        elif ft[&quot;dtype&quot;] == &quot;float32&quot;:           # ← 触觉走这个分支
+            frame[key] = np.array(values[key], dtype=np.float32)  # (12, 32)
+        elif ft[&quot;dtype&quot;] in [&quot;image&quot;, &quot;video&quot;]:
+            frame[key] = values[key.removeprefix(f&quot;{prefix}.images.&quot;)]
+    return frame</code></pre>
+
+<p>触觉数据（2D float32）直接作为 numpy 数组存入帧中，无需额外的图像编解码。</p>
+
+<h3 id="53-数据集存储格式">5.3 数据集存储格式</h3>
+
+<p>触觉数据以 <code>datasets.Array2D</code> 格式存储在 Parquet 文件中：</p>
+
+<pre><code># feature_utils.py:60-61
+elif len(ft[&quot;shape&quot;]) == 2:
+    hf_features[key] = datasets.Array2D(shape=ft[&quot;shape&quot;], dtype=ft[&quot;dtype&quot;])</code></pre>
+
+<p>在数据集目录中，触觉数据与关节状态、任务索引等一样直接存入 Parquet 文件（不生成图像/视频文件）：</p>
+
+<pre><code>dataset_root/
+├── data/
+│   └── chunk-000/
+│       └── file-000.parquet    ← 包含 observation.tactile.primary 列
+├── meta/
+│   ├── info.json               ← 包含 tactile_sensors 元数据
+│   └── stats.json              ← 触觉数据的归一化统计量
+└── videos/                     ← 仅摄像头图像</code></pre>
+
+<h3 id="54-特征组合">5.4 特征组合</h3>
+
+<pre><code># record.py:456-469
+dataset_features = combine_feature_dicts(
+    aggregate_pipeline_dataset_features(teleop_action_processor, ...),
+    aggregate_pipeline_dataset_features(robot_observation_processor, ...),
+)</code></pre>
+
+<p><code>combine<em>feature</em>dicts()</code> (feature_utils.py:234-283) 合并多个来源的特征字典。对于触觉这样的非 1D 特征，遵循&quot;最后写入者胜&quot;的策略（如果遇到相同的 key）。向量型特征（如 <code>observation.state</code>）按 names 合并。</p>
+
+<hr>
+
+<h2 id="6-处理器层processor-pipeline">6. 处理器层（Processor Pipeline）</h2>
+
+<p>位于 <a href="src/lerobot/processor/tactile<em>processor.py">processor/tactile</em>processor.py</a></p>
+
+<h3 id="61-tactilevalidationprocessorstep">6.1 TactileValidationProcessorStep</h3>
+
+<p><strong>数据格式验证器</strong>，确保触觉数据张量的形状正确：</p>
+
+<pre><code>class TactileValidationProcessorStep(ObservationProcessorStep):
+    def __init__(self, expected_shape=(12, 32)):
+        self.expected_shape = tuple(expected_shape)
+
+    def observation(self, obs):
+        for key in obs:
+            if not key.startswith(OBS_TACTILE):  # 仅处理触觉键
+                continue
+
+            tactile_data = obs[key]
+            # numpy → torch
+            if isinstance(tactile_data, np.ndarray):
+                tactile_data = torch.from_numpy(tactile_data).float()
+
+            # 处理4D: (B, 1, H, W) → (B, H, W) 去除通道维
+            if tactile_data.dim() == 4 and tactile_data.shape[1] == 1:
+                tactile_data = tactile_data.squeeze(1)
+
+            # 验证最后两个维度 (H, W) 必须匹配期望值
+            actual_shape = tuple(tactile_data.shape[-2:])
+            if actual_shape != self.expected_shape:
+                raise ValueError(f&quot;Expected {self.expected_shape}, got {actual_shape}&quot;)
+
+            obs[key] = tactile_data
+        return obs</code></pre>
+
+<h3 id="62-tactiletemporalfilterprocessorstep">6.2 TactileTemporalFilterProcessorStep</h3>
+
+<p><strong>指数移动平均 (EMA) 时域滤波器</strong>，用于平滑触觉信号以降低高频噪声：</p>
+
+<pre><code>class TactileTemporalFilterProcessorStep(ObservationProcessorStep):
+    def __init__(self, alpha=0.2):
+        self.alpha = alpha                    # EMA平滑系数
+        self._prev_tactile: dict[str, Tensor] = {}  # 保存每个传感器的上一帧
+
+    def observation(self, obs):
+        for key in obs:
+            if not key.startswith(OBS_TACTILE):
+                continue
+
+            tactile_data = obs[key]  # 转为 torch.Tensor
+
+            # EMA: new = alpha * current + (1 - alpha) * previous
+            if key in self._prev_tactile:
+                tactile_data = self.alpha * tactile_data + (1 - self.alpha) * self._prev_tactile[key]
+
+            self._prev_tactile[key] = tactile_data.clone().detach()
+            obs[key] = tactile_data
+        return obs
+
+    def reset(self):
+        self._prev_tactile.clear()  # 跨 episode 重置滤波器状态</code></pre>
+
+<hr>
+
+<h2 id="7-策略模型层policy">7. 策略模型层（Policy）</h2>
+
+<h3 id="71-共享触觉编码器">7.1 共享触觉编码器</h3>
+
+<p>位于 <a href="src/lerobot/policies/tactile/encoder.py">policies/tactile/encoder.py</a></p>
+
+<p>这是所有策略模型共用的触觉编码器模块，提供了三种编码器架构。</p>
+
+<h4 id="711-tactilecnn">7.1.1 TactileCNN</h4>
+
+<p>基础的 3 层卷积神经网络，将 <code>(B, H, W)</code> 触觉图编码为 <code>(B, feature_dim)</code> 特征向量：</p>
+
+<pre><code>输入: (B, 1, 12, 32)  ← 自动添加通道维
+  ↓ Conv2d(1, 32, 3×3) + BN + ReLU + MaxPool2d(2×2)
+  ↓ Conv2d(32, 64, 3×3) + BN + ReLU + MaxPool2d(2×2)
+  ↓ Conv2d(64, 128, 3×3) + BN + ReLU + MaxPool2d(2×2)
+  ↓ Flatten → (B, 128 * H/8 * W/8)
+  ↓ Linear → 512 + ReLU + Dropout
+  ↓ Linear → feature_dim (256)
+输出: (B, feature_dim)</code></pre>
+
+<h4 id="712-tactileattentioncnn">7.1.2 TactileAttentionCNN</h4>
+
+<p>带<strong>空间注意力机制</strong>的 CNN，通过注意力加权突出接触区域：</p>
+
+<pre><code>输入: (B, 1, 12, 32)
+  ↓ Conv2d(1, 64, 3×3) + BN + ReLU + MaxPool
+  ↓ Conv2d(64, 128, 3×3) + BN + ReLU + MaxPool
+  ↓ Conv2d(128, 256, 3×3) + BN + ReLU + MaxPool
+  ↓ ┌─ Spatial Attention ──────────────────┐
+  ↓ │ Conv2d(256,128,1×1)→ReLU→Conv(128,1)│
+  ↓ │               ↓ Sigmoid              │
+  ↓ │          attention_weights            │
+  ↓ └── × ─────────────────────────────────┘
+  ↓ GlobalAvgPool + GlobalMaxPool → concat → (B, 512)
+  ↓ Linear → 512 + ReLU + Dropout + Linear → feature_dim
+输出: (B, feature_dim)</code></pre>
+
+<p>注意力机制使模型能自动聚焦于触觉图中有接触压力的空间区域。</p>
+
+<h4 id="713-tactiletokenencoder">7.1.3 TactileTokenEncoder</h4>
+
+<p><strong>顶层封装</strong>，将 CNN backbone 的输出投影为多个 token embedding：</p>
+
+<pre><code>class TactileTokenEncoder(nn.Module):
+    def __init__(self, encoder_type, input_shape, feature_dim, n_tokens=1, dropout=0.3):
+        # 选择 backbone
+        if encoder_type == &quot;cnn&quot;:
+            self.backbone = TactileCNN(...)
+        elif encoder_type == &quot;attention&quot;:
+            self.backbone = TactileAttentionCNN(...)
+
+        # n_tokens &gt; 1 时，投影到多个 token
+        self.token_proj = Linear(feature_dim, n_tokens * feature_dim)
+
+    def forward(self, x: Tensor) -&gt; Tensor:
+        # x: (B, H, W)
+        feat = self.backbone(x)                       # (B, feature_dim)
+        if self.n_tokens == 1:
+            return feat.unsqueeze(1)                  # (B, 1, feature_dim)
+        feat = self.token_proj(feat)                  # (B, n_tokens*feature_dim)
+        return feat.view(B, self.n_tokens, feature_dim)  # (B, n_tokens, feature_dim)</code></pre>
+
+<p><strong>输入输出规范</strong>：</p>
+<ul>
+<li>输入：<code>(B, H, W)</code> — 触觉帧，自动添加通道维度</li>
+<li>输出：<code>(B, n<em>tokens, feature</em>dim)</code> — token 嵌入序列</li>
+</ul>
+
+<h3 id="72-各策略的触觉配置">7.2 各策略的触觉配置</h3>
+
+<h4 id="721-act">7.2.1 ACT</h4>
+
+<pre><code># configuration_act.py
+use_tactile: bool = False                     # 启用触觉
+tactile_encoder_type: str = &quot;cnn&quot;            # cnn 或 attention
+tactile_input_shape: tuple[int, int] = (12, 32)
+tactile_dropout: float = 0.3
+tactile_features: list[str] | None = None    # 多传感器键名列表
+n_tactile_tokens: int = 1                    # 每传感器的 token 数
+
+# 归一化映射中新增 TACTILE
+normalization_mapping = {
+    &quot;VISUAL&quot;: NormalizationMode.MEAN_STD,
+    &quot;STATE&quot;: NormalizationMode.MEAN_STD,
+    &quot;ACTION&quot;: NormalizationMode.MEAN_STD,
+    &quot;TACTILE&quot;: NormalizationMode.MEAN_STD,   # 🆕
+}</code></pre>
+
+<p>ACT 的 <code>validate<em>features()</code> 会检查：如果没有图像和环境状态特征，但有 <code>use</em>tactile=True</code> 也视为有效输入。</p>
+
+<h4 id="722-diffusion-policy">7.2.2 Diffusion Policy</h4>
+
+<pre><code># configuration_diffusion.py
+use_tactile: bool = False
+tactile_encoder_type: str = &quot;cnn&quot;
+tactile_input_shape: tuple[int, int] = (12, 32)
+tactile_dropout: float = 0.3
+tactile_feature_dim: int = 32               # 区别于 ACT 的 256
+tactile_features: list[str] | None = None
+n_tactile_chunks: int = 1                   # 区分子 token 命名
+
+# modeling_diffusion.py 中的集成
+if self.config.use_tactile:
+    n_sensors = len(self.config.tactile_features) if self.config.tactile_features else 1
+    self.tactile_encoder = TactileTokenEncoder(
+        encoder_type=config.tactile_encoder_type,
+        input_shape=config.tactile_input_shape,
+        feature_dim=config.tactile_feature_dim,      # 32
+        n_tokens=config.n_tactile_chunks,
+        dropout=config.tactile_dropout,
+    )
+    # 将触觉特征拼接到 global_cond 中
+    global_cond_dim += n_sensors * config.n_tactile_chunks * config.tactile_feature_dim
+
+# forward() 中的使用
+if self.config.use_tactile:
+    for tactile_key in tactile_keys:
+        tactile_data = batch[tactile_key]          # (B, n_obs_steps, H, W)
+        bs, n_obs = tactile_data.shape[:2]
+        tactile_flat = tactile_data.flatten(0, 1)  # (B*n_obs, H, W)
+        chunks = self.tactile_encoder(tactile_flat) # (B*n_obs, n_chunks, feat_dim)
+        # ... 加入 global_cond</code></pre>
+
+<p>Diffusion Policy 将触觉编码为<strong>条件向量</strong>（global conditioning），与位置/时间嵌入拼接后注入去噪 UNet。</p>
+
+<h4 id="723-pi05">7.2.3 Pi0.5</h4>
+
+<pre><code># configuration_pi05.py
+use_tactile: bool = False
+tactile_encoder_type: str = &quot;cnn&quot;
+tactile_input_shape: tuple[int, int] = (12, 32)
+tactile_dropout: float = 0.3
+tactile_feature_dim: int = 256              # 内部 CNN 输出 → 投影到 paligemma 宽度
+tactile_features: list[str] | None = None
+n_tactile_tokens: int = 1                   # 作为 prefix token 注入</code></pre>
+
+<h4 id="724-smolvla">7.2.4 SmolVLA</h4>
+
+<pre><code># configuration_smolvla.py
+use_tactile: bool = False
+tactile_encoder_type: str = &quot;cnn&quot;
+tactile_input_shape: tuple[int, int] = (12, 32)
+tactile_dropout: float = 0.3
+tactile_feature_dim: int = 256              # 内部 CNN 输出 → 投影到 VLM hidden size
+tactile_features: list[str] | None = None
+n_tactile_tokens: int = 1                   # 作为 prefix token 注入 VLM</code></pre>
+
+<h3 id="73-策略中的触觉数据流">7.3 策略中的触觉数据流</h3>
+
+<pre><code>batch[&quot;observation.tactile.primary&quot;]  ← shape: (B, n_obs_steps, 12, 32)
+    ↓
+flatten:  (B * n_obs_steps, 12, 32)   ← 将 batch 和 obs 维度合并
+    ↓
+TactileTokenEncoder.forward()
+    ├── TactileCNN / TactileAttentionCNN 卷积编码
+    ├── feature vector (B*n_obs, feature_dim)
+    └── token projection → (B*n_obs, n_tokens, feature_dim)
+    ↓
+根据策略类型加入：
+    ├── ACT: 作为额外的 transformer encoder 输入 token
+    ├── Diffusion: 拼接到 global_cond 条件向量
+    ├── Pi0.5: 作为 prefix token 注入 VLM
+    └── SmolVLA: 作为 prefix token 注入 VLM</code></pre>
+
+<hr>
+
+<h2 id="8-训练与评估">8. 训练与评估</h2>
+
+<h3 id="81-cli-训练参数">8.1 CLI 训练参数</h3>
+
+<pre><code># 单传感器训练
+lerobot-train \
+    --dataset.repo_id=my_org/tactile_dataset \
+    --policy.type=act \
+    --policy.use_tactile=true \
+    --policy.tactile_features=&#x27;[&quot;observation.tactile.primary&quot;]&#x27; \
+    --policy.n_tactile_tokens=4
+
+# 双传感器训练
+lerobot-train \
+    --policy.type=diffusion \
+    --policy.use_tactile=true \
+    --policy.tactile_features=&#x27;[&quot;observation.tactile.left&quot;, &quot;observation.tactile.right&quot;]&#x27; \
+    --policy.n_tactile_chunks=2
+
+# 使用 attention encoder
+lerobot-train \
+    --policy.type=act \
+    --policy.use_tactile=true \
+    --policy.tactile_encoder_type=attention</code></pre>
+
+<h3 id="82-归一化">8.2 归一化</h3>
+
+<p>触觉特征使用 <code>NormalizationMode.MEAN_STD</code> 进行归一化（与视觉特征一致），stats 在数据集构建时计算并存储在 <code>stats.json</code> 中。训练时 <code>NormalizerProcessorStep</code> 加载这些统计量对触觉数据进行标准化。</p>
+
+<hr>
+
+<h2 id="9-数据可视化">9. 数据可视化</h2>
+
+<p>位于 <a href="src/lerobot/scripts/lerobot<em>dataset</em>viz<em>tactile.py">scripts/lerobot</em>dataset<em>viz</em>tactile.py</a></p>
+
+<h3 id="91-功能">9.1 功能</h3>
+
+<p><code>lerobot-dataset-viz-tactile</code> 是 <code>lerobot-dataset-viz</code> 的触觉感知版本，基于 <strong>Rerun</strong> 进行可视化：</p>
+
+<ul>
+<li>自动检测数据集中所有以 <code>observation.tactile</code> 开头且为 2D 形状的特征</li>
+<li>将触觉帧渲染为伪彩色（VIRIDIS）图像</li>
+<li>与摄像头图像、关节状态、动作在同一时间轴同步显示</li>
+</ul>
+
+<h3 id="92-触觉渲染管线">9.2 触觉渲染管线</h3>
+
+<pre><code># 与 TactileSensor 实时可视化保持一致的渲染管线
+def build_tactile_rgb(frame, prev):
+    # 1. 自适应归一化
+    max_val = np.max(frame)
+    if max_val &lt; TACTILE_THRESHOLD (25.0):
+        normalized = frame / TACTILE_NOISE_SCALE (30.0)
+    else:
+        normalized = frame / (max_val + 1e-6)
+    normalized = np.clip(normalized, 0.0, 1.0)
+
+    # 2. EMA 时域滤波
+    filtered = ALPHA (0.2) * normalized + (1 - ALPHA) * prev
+
+    # 3. uint8 → VIRIDIS 伪彩色 → 放大 60×
+    scaled = (filtered * 255).astype(np.uint8)
+    bgr = cv2.applyColorMap(scaled, cv2.COLORMAP_VIRIDIS)
+    rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+    rgb = cv2.resize(rgb, (w*60, h*60), interpolation=cv2.INTER_NEAREST)
+
+    return rgb, filtered</code></pre>
+
+<h3 id="93-使用示例">9.3 使用示例</h3>
+
+<pre><code># 本地可视化
+lerobot-dataset-viz-tactile \
+    --repo-id so101_tactile_pens_bag_dev \
+    --root /path/to/dataset \
+    --episode-index 0
+
+# 保存为 .rrd 文件
+lerobot-dataset-viz-tactile \
+    --repo-id so101_tactile_pens_bag_dev \
+    --root /path/to/dataset \
+    --episode-index 0 \
+    --save 1 --output-dir /tmp/rrd
+
+# 远端 Rerun 服务器
+lerobot-dataset-viz-tactile \
+    --repo-id so101_tactile_pens_bag_dev \
+    --root /path/to/dataset \
+    --episode-index 0 \
+    --mode distant --web-port 9090</code></pre>
+
+<hr>
+
+<h2 id="10-远端推理通讯client-server">10. 远端推理通讯（Client-Server）</h2>
+
+<p>位于 <a href="src/lerobot/async<em>inference/robot</em>client.py">async<em>inference/robot</em>client.py</a> 和 <a href="src/lerobot/transport/">transport/</a></p>
+
+<h3 id="101-通讯架构">10.1 通讯架构</h3>
+
+<pre><code>┌─────────────────┐          gRPC (protobuf)         ┌─────────────────┐
+│  RobotClient    │ ←─────────────────────────────→ │  PolicyServer   │
+│  (机器人端)     │    observation / action chunks   │  (策略推理端)   │
+│                 │                                  │                 │
+│ get_observation │ ─── TimedObservation ──────────→ │ policy.forward  │
+│  ↑ 含触觉数据   │                                  │      ↓          │
+│  ↓              │ ←── TimedAction ─────────────── │ action_chunk    │
+│ send_action     │                                  │                 │
+└─────────────────┘                                  └─────────────────┘</code></pre>
+
+<h3 id="102-触觉数据的传输">10.2 触觉数据的传输</h3>
+
+<p>机器人的 <code>get_observation()</code> 返回包含触觉帧的完整观测字典，整个字典通过 pickle 序列化后经 gRPC 以<strong>分块传输</strong>（2MB/chunk）发送到策略服务器。触觉数据是 <code>(12, 32) float32</code> numpy 数组（约 1.5KB），相比图像数据非常小，传输开销可忽略。</p>
+
+<pre><code># robot_client.py:control_loop_observation()
+raw_observation = self.robot.get_observation()  # 含 observation.tactile.*
+observation = TimedObservation(
+    timestamp=time.time(),
+    observation=raw_observation,  # 包含触觉帧
+    timestep=latest_action,
+)
+self.send_observation(observation)  # pickle → gRPC chunks</code></pre>
+
+<hr>
+
+<h2 id="11-cli-命令行集成">11. CLI 命令行集成</h2>
+
+<h3 id="111-录制数据">11.1 录制数据</h3>
+
+<pre><code># 使用 so_tactile_follower + 单个触觉传感器
+lerobot-record \
+    --robot.type=so_tactile_follower \
+    --robot.port=/dev/tty.usbmodem58760431541 \
+    --robot.cameras=&#x27;{laptop: {type: opencv, index_or_path: 0, width: 640, height: 480, fps: 30}}&#x27; \
+    --robot.tactile_sensors=&#x27;{&quot;primary&quot;: {&quot;port&quot;: &quot;/dev/ttyUSB0&quot;}}&#x27; \
+    --robot.id=black \
+    --teleop.type=so100_leader \
+    --teleop.port=/dev/tty.usbmodem58760431551 \
+    --teleop.id=blue \
+    --dataset.repo_id=my_org/tactile_dataset \
+    --dataset.single_task=&quot;Pick up the object&quot; \
+    --dataset.num_episodes=50 \
+    --dataset.tactile_calibration_timeout_s=30 \
+    --display_data=true
+
+# 双传感器录制
+lerobot-record \
+    --robot.type=so_tactile_follower \
+    --robot.tactile_sensors=&#x27;{&quot;left&quot;: {&quot;port&quot;: &quot;/dev/ttyUSB0&quot;}, &quot;right&quot;: {&quot;port&quot;: &quot;/dev/ttyUSB1&quot;}}&#x27; \
+    ...</code></pre>
+
+<h3 id="112-遥操作">11.2 遥操作</h3>
+
+<pre><code>lerobot-teleoperate \
+    --robot.type=so_tactile_follower \
+    --robot.tactile_sensors=&#x27;{&quot;primary&quot;: {&quot;port&quot;: &quot;/dev/ttyUSB0&quot;}}&#x27; \
+    ...</code></pre>
+
+<h3 id="113-训练">11.3 训练</h3>
+
+<pre><code>lerobot-train \
+    --dataset.repo_id=my_org/tactile_dataset \
+    --policy.type=act \
+    --policy.use_tactile=true \
+    --policy.tactile_features=&#x27;[&quot;observation.tactile.primary&quot;]&#x27; \
+    --policy.tactile_encoder_type=attention \
+    --policy.n_tactile_tokens=4 \
+    --policy.device=cuda</code></pre>
+
+<h3 id="114-可视化">11.4 可视化</h3>
+
+<pre><code>lerobot-dataset-viz-tactile \
+    --repo-id my_org/tactile_dataset \
+    --episode-index 0</code></pre>
+
+<hr>
+
+<h2 id="12-完整数据流总结">12. 完整数据流总结</h2>
+
+<p>从硬件到模型训练的端到端数据流：</p>
+
+<pre><code>┌─────────────────────────────────────────────────────────────────────┐
+│ 阶段 1: 硬件采集                                                    │
+│                                                                     │
+│ FlexiTac 硬件 ──USB Serial──→ TactileSensor                         │
+│   • 12×32 电容阵列, 2M baud                                       │
+│   • 后台线程连续读取                                               │
+│   • 自动/手动基线校准                                              │
+│   • 归一化到 [0,1]                                                 │
+└──────────────────────────┬──────────────────────────────────────────┘
+                           │ data: np.ndarray (12, 32) float32
+┌──────────────────────────▼──────────────────────────────────────────┐
+│ 阶段 2: 机器人观测                                                  │
+│                                                                     │
+│ SOTactileFollower.get_observation()                                 │
+│   → {&quot;shoulder_pan.pos&quot;: 0.5, ...,                                 │
+│      &quot;laptop&quot;: &lt;image&gt;,                                            │
+│      &quot;observation.tactile.primary&quot;: np.array(12,32)}               │
+└──────────────────────────┬──────────────────────────────────────────┘
+                           │ RobotObservation dict
+┌──────────────────────────▼──────────────────────────────────────────┐
+│ 阶段 3: 数据处理 (可选)                                             │
+│                                                                     │
+│ TactileValidationProcessorStep: 形状验证                            │
+│ TactileTemporalFilterProcessorStep: EMA 时域滤波                    │
+└──────────────────────────┬──────────────────────────────────────────┘
+                           │ processed observation
+┌──────────────────────────▼──────────────────────────────────────────┐
+│ 阶段 4: 数据存储                                                    │
+│                                                                     │
+│ build_dataset_frame() → LeRobotDataset.add_frame()                  │
+│   • 触觉帧以 Array2D(shape=(12,32), dtype=float32) 入 Parquet      │
+│   • 传感器元数据(校准基线等)写入 info.json                          │
+│   • 统计量(stats.json)按 MEAN_STD 计算                             │
+└──────────────────────────┬──────────────────────────────────────────┘
+                           │ hf_dataset
+┌──────────────────────────▼──────────────────────────────────────────┐
+│ 阶段 5: 策略训练/推理                                               │
+│                                                                     │
+│ DataLoader → batch[&quot;observation.tactile.primary&quot;]                   │
+│   ↓ shape: (B, n_obs_steps, 12, 32)                                │
+│ TactileTokenEncoder.forward()                                       │
+│   ↓ (B*n_obs_steps, n_tokens, feature_dim)                         │
+│ 注入策略模型:                                                       │
+│   ├── ACT: Transformer Encoder 附加 token                           │
+│   ├── Diffusion: global_cond 拼接                                   │
+│   ├── Pi0.5: VLM prefix token                                      │
+│   └── SmolVLA: VLM prefix token                                    │
+└─────────────────────────────────────────────────────────────────────┘</code></pre>
+
+<h3 id="设计原则总结">设计原则总结</h3>
+
+<ol>
+<li><strong>最小侵入</strong>：通过继承而非修改原始类来扩展（<code>SOTactileFollower extends SOFollower</code>），保持与原始 LeRobot 框架的兼容性。</li>
+</ol>
+
+<ol>
+<li><strong>类型系统集成</strong>：新增 <code>FeatureType.TACTILE</code> 使触觉成为一等公民，在特征流转的每个环节都有明确标识。</li>
+</ol>
+
+<ol>
+<li><strong>命名约定</strong>：统一使用 <code>observation.tactile.{name}</code> 键名，支持单/多传感器。</li>
+</ol>
+
+<ol>
+<li><strong>后端复用</strong>：TactileTokenEncoder 是所有策略共用的模块，编码器类型（CNN/Attention）通过配置切换。</li>
+</ol>
+
+<ol>
+<li><strong>容错设计</strong>：传感器读取失败时返回零矩阵，确保数据采集不中断。</li>
+</ol>
+
+<ol>
+<li><strong>元数据完整</strong>：校准基线、传感器参数随数据集保存，确保归一化参数可复现。</li>
+</ol>
+
+<ol>
+<li><strong>传输透明</strong>：触觉数据作为观测字典的一部分自然流经 gRPC 传输层，无需特殊处理。</li>
+</ol>
+
+</body>
+</html>

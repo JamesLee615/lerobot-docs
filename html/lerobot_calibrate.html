@@ -1,0 +1,417 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>LeRobot 标定（Calibration）详解</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    line-height: 1.7; color: #24292e; background: #fff;
+    max-width: 800px; margin: 0 auto; padding: 16px;
+    font-size: 16px;
+}
+h1 { font-size: 1.8em; border-bottom: 2px solid #e1e4e8; padding-bottom: 0.3em; margin: 24px 0 16px; }
+h2 { font-size: 1.45em; border-bottom: 1px solid #e1e4e8; padding-bottom: 0.3em; margin: 24px 0 16px; }
+h3 { font-size: 1.25em; margin: 24px 0 16px; }
+h4 { font-size: 1.1em; margin: 24px 0 16px; }
+p { margin: 0 0 16px; }
+a { color: #0366d6; text-decoration: none; }
+a:hover { text-decoration: underline; }
+code {
+    background: #f6f8fa; padding: 2px 6px; border-radius: 4px;
+    font-family: 'SF Mono', 'Fira Code', monospace; font-size: 0.9em;
+}
+pre {
+    background: #f6f8fa; padding: 16px; border-radius: 6px;
+    overflow-x: auto; margin: 0 0 16px; line-height: 1.45;
+}
+pre code { background: none; padding: 0; }
+blockquote {
+    border-left: 4px solid #dfe2e5; padding: 0 16px; color: #6a737d; margin: 0 0 16px;
+}
+table { border-collapse: collapse; width: 100%; margin: 0 0 16px; }
+th, td { border: 1px solid #dfe2e5; padding: 8px 12px; text-align: left; }
+th { background: #f6f8fa; font-weight: 600; }
+tr:nth-child(even) { background: #f6f8fa; }
+ul, ol { padding-left: 2em; margin: 0 0 16px; }
+li { margin: 4px 0; }
+img { max-width: 100%; }
+hr { border: none; border-top: 1px solid #e1e4e8; margin: 24px 0; }
+strong { font-weight: 600; }
+.index-list { list-style: none; padding: 0; }
+.index-list li { margin: 12px 0; padding: 12px 16px; background: #f6f8fa; border-radius: 8px; }
+.index-list a { font-size: 1.1em; font-weight: 500; }
+.back-link { display: inline-block; margin-bottom: 16px; color: #586069; font-size: 0.9em; }
+</style>
+</head>
+<body>
+<a class="back-link" href="index.html">← 返回索引</a>
+<h1 id="lerobot-标定calibration详解">LeRobot 标定（Calibration）详解</h1>
+
+<blockquote>基于 <code>src/lerobot/scripts/lerobot_calibrate.py</code>（103行）及机器人抽象基类，全面解析标定的架构设计与实现原理。</blockquote>
+
+<hr>
+
+<h2 id="目录">目录</h2>
+
+<ol>
+<li><a href="#1-概述">概述</a></li>
+<li><a href="#2-标定入口lerobot<em>calibrate">标定入口：lerobot</em>calibrate</a></li>
+<li><a href="#3-robot-基类的标定机制">Robot 基类的标定机制</a></li>
+<li><a href="#4-so-100-标定流程详解">SO-100 标定流程详解</a></li>
+<li><a href="#5-电机总线层标定">电机总线层标定</a></li>
+<li><a href="#6-标定数据持久化">标定数据持久化</a></li>
+</ol>
+
+<hr>
+
+<h2 id="1-概述">1. 概述</h2>
+
+<p>标定（Calibration）是机器人操作中的关键步骤，用于确定电机的零位（homing offset）和工作范围（range limits）。LeRobot 中每种机器人和主手设备都实现了自己的标定流程。</p>
+
+<p><strong>核心原则</strong>：</p>
+<ul>
+<li>标定将电机原始编码器值映射到用户友好的坐标系（角度、-100~100%、0~100%）</li>
+<li>标定数据同时存储在电机 EEPROM 和本地 JSON 文件中</li>
+<li><code>connect()</code> 时自动检查是否已标定，未标定则自动触发标定流程</li>
+</ul>
+
+<hr>
+
+<h2 id="2-标定入口lerobot_calibrate">2. 标定入口：lerobot_calibrate</h2>
+
+<p><strong>文件</strong>: <code>src/lerobot/scripts/lerobot_calibrate.py</code> (103 行)</p>
+
+<h3 id="21-配置类">2.1 配置类</h3>
+
+<pre><code>@dataclass
+class CalibrateConfig:
+    teleop: TeleoperatorConfig | None = None  # 主手配置
+    robot: RobotConfig | None = None          # 机器人配置
+
+    def __post_init__(self):
+        # 互斥检查：必须且只能选择一个设备
+        if bool(self.teleop) == bool(self.robot):
+            raise ValueError(&quot;Choose either a teleop or a robot.&quot;)
+        self.device = self.robot if self.robot else self.teleop</code></pre>
+
+<h3 id="22-标定主流程">2.2 标定主流程</h3>
+
+<pre><code>@draccus.wrap()
+def calibrate(cfg: CalibrateConfig):
+    init_logging()
+
+    # 1. 根据配置类型创建对应的设备实例
+    if isinstance(cfg.device, RobotConfig):
+        device = make_robot_from_config(cfg.device)
+    elif isinstance(cfg.device, TeleoperatorConfig):
+        device = make_teleoperator_from_config(cfg.device)
+
+    # 2. 连接设备（但不自动标定）
+    device.connect(calibrate=False)
+
+    try:
+        # 3. 手动触发标定
+        device.calibrate()
+    finally:
+        # 4. 无论成功与否都断开连接
+        device.disconnect()</code></pre>
+
+<p><strong>关键点</strong>：<code>connect(calibrate=False)</code> 参数防止自动标定，让用户在连接后主动控制标定时机。</p>
+
+<h3 id="23-使用示例">2.3 使用示例</h3>
+
+<pre><code># 标定从手机器人
+lerobot-calibrate \
+    --robot.type=so100_follower \
+    --robot.port=/dev/tty.usbmodem58760431541 \
+    --robot.id=black
+
+# 标定主手
+lerobot-calibrate \
+    --teleop.type=so100_leader \
+    --teleop.port=/dev/tty.usbmodem58760431551 \
+    --teleop.id=blue</code></pre>
+
+<hr>
+
+<h2 id="3-robot-基类的标定机制">3. Robot 基类的标定机制</h2>
+
+<p><strong>文件</strong>: <code>src/lerobot/robots/robot.py</code></p>
+
+<h3 id="31-connect-中的自动标定逻辑">3.1 connect() 中的自动标定逻辑</h3>
+
+<pre><code>class Robot(ABC):
+    calibration_dir: Path     # $HF_LEROBOT_HOME/calibration/robots/&lt;name&gt;/
+    calibration_fpath: Path   # &lt;id&gt;.json
+
+    def connect(self, calibrate: bool = True):
+        self.bus.connect()       # 连接电机总线
+
+        if calibrate and not self.is_calibrated:
+            # 如果未标定且 calibrate=True，自动执行标定
+            self.calibrate()
+
+    @property
+    def is_calibrated(self) -&gt; bool:
+        # 检查电机总线层面是否已标定
+        return self.bus.is_calibrated</code></pre>
+
+<h3 id="32-标定文件管理">3.2 标定文件管理</h3>
+
+<pre><code># 保存标定数据
+def _save_calibration(self, calibration: dict):
+    self.calibration_dir.mkdir(parents=True, exist_ok=True)
+    with open(self.calibration_fpath, &quot;w&quot;) as f:
+        json.dump(calibration, f, indent=4)
+
+# 加载标定数据
+def _load_calibration(self) -&gt; dict | None:
+    if self.calibration_fpath.exists():
+        with open(self.calibration_fpath) as f:
+            return json.load(f)
+    return None</code></pre>
+
+<p><strong>标定文件路径示例</strong>：</p>
+<pre><code>$HF_LEROBOT_HOME/calibration/robots/so100_follower/black.json
+$HF_LEROBOT_HOME/calibration/teleoperators/so100_leader/blue.json</code></pre>
+
+<hr>
+
+<h2 id="4-so-100-标定流程详解">4. SO-100 标定流程详解</h2>
+
+<p>以 SO-100 系列（<code>So100Follower</code> / <code>So100Leader</code>）为例，标定流程包含以下步骤：</p>
+
+<h3 id="41-so100follower-的-calibrate">4.1 SO100Follower 的 calibrate()</h3>
+
+<pre><code># 电机配置 (6 个 STS3215 舵机):
+#   shoulder_pan  (ID 1)   - DEGREES 模式
+#   shoulder_lift (ID 2)   - DEGREES 模式
+#   elbow_flex    (ID 3)   - DEGREES 模式
+#   wrist_flex    (ID 4)   - DEGREES 模式
+#   wrist_roll    (ID 5)   - DEGREES 模式 (连续旋转)
+#   gripper       (ID 6)   - RANGE_0_100 模式
+
+def calibrate(self):
+    # 步骤 1: 禁用所有电机扭矩
+    self.bus.disable_torque()
+
+    # 步骤 2: 设置位置控制模式
+    # 步骤 3: 将手臂移到中间位置，按 Enter
+    input(&quot;Move the arm to a rest position and press Enter&quot;)
+
+    # 步骤 4: 设置半圈归位（Set Half Turn Homings）
+    self.bus.set_half_turn_homings()
+    # 这会读取当前编码器位置，计算 homing_offset 使得当前位置成为零点
+
+    # 步骤 5: 记录运动范围（Record Ranges of Motion）
+    input(&quot;Move all joints through their full range of motion, then press Enter&quot;)
+    self.bus.record_ranges_of_motion()
+    # 用户自由移动所有关节，系统记录 min/max 编码器值
+
+    # 步骤 6: 处理 wrist_roll (连续旋转关节)
+    # wrist_roll 的范围强制设为 [0, 4095]（全范围旋转）
+
+    # 步骤 7: 写入 EEPROM 并保存 JSON
+    calibration = self.bus.read_calibration()
+    self._save_calibration(calibration)</code></pre>
+
+<h3 id="42-so100leader-的-calibrate">4.2 SO100Leader 的 calibrate()</h3>
+
+<p>主手的标定流程与从手完全相同，但运行在 <strong>扭矩禁用</strong> 模式（主手是背驱的，用户手动移动它）：</p>
+
+<pre><code>class SO100Leader:
+    def calibrate(self):
+        # 与 So100Follower 完全相同的流程
+        # 区别：configure() 中扭矩始终禁用
+        self.bus.disable_torque()
+        # ... 相同的 set_half_turn_homings + record_ranges_of_motion</code></pre>
+
+<h3 id="43-bimanual-双臂标定">4.3 Bimanual 双臂标定</h3>
+
+<p><code>BiSOFollower</code> / <code>BiSOLeader</code> 的标定将左右臂分别标定：</p>
+
+<pre><code>class BiSOFollower(Robot):
+    def calibrate(self):
+        self.left_arm.calibrate()   # 先标定左臂
+        self.right_arm.calibrate()  # 再标定右臂</code></pre>
+
+<hr>
+
+<h2 id="5-电机总线层标定">5. 电机总线层标定</h2>
+
+<p><strong>文件</strong>: <code>src/lerobot/motors/motors_bus.py</code> — <code>SerialMotorsBus</code></p>
+
+<h3 id="51-两种标定模式">5.1 两种标定模式</h3>
+
+<pre><code>class SerialMotorsBus:
+    def set_half_turn_homings(self):
+        &quot;&quot;&quot;
+        将当前位置设为零点
+        对每个电机:
+          1. 读取当前编码器值 (present_position)
+          2. 将 homing_offset 设置为使得当前位置映射到范围中点的值
+          3. 写入电机 EEPROM
+        &quot;&quot;&quot;
+
+    def record_ranges_of_motion(self):
+        &quot;&quot;&quot;
+        交互式记录运动范围
+        对每个电机:
+          1. 持续读取编码器值
+          2. 记录最小值和最大值
+          3. 用户按 Enter 确认
+          4. 将 min/max 写入 EEPROM
+        &quot;&quot;&quot;</code></pre>
+
+<h3 id="52-归一化模式-motornormmode">5.2 归一化模式 (MotorNormMode)</h3>
+
+<p>标定数据被用于将原始编码器值映射到用户友好的单位：</p>
+
+<pre><code>class MotorNormMode(Enum):
+    RANGE_0_100 = &quot;RANGE_0_100&quot;        # gripper: 原始值 → [0, 100]
+    RANGE_M100_100 = &quot;RANGE_M100_100&quot;  # 对称范围: 原始值 → [-100, 100]
+    DEGREES = &quot;DEGREES&quot;                # 角度: 原始值 → 度数
+
+# 归一化公式:
+# DEGREES: value = (raw - homing_offset) * 360 / 4096
+# RANGE_M100_100: value = (raw - min_raw) / (max_raw - min_raw) * 200 - 100
+# RANGE_0_100: value = (raw - min_raw) / (max_raw - min_raw) * 100</code></pre>
+
+<h3 id="53-标定数据结构">5.3 标定数据结构</h3>
+
+<pre><code>@dataclass
+class MotorCalibration:
+    id: int              # 电机 ID
+    drive_mode: int      # 驱动模式
+    homing_offset: int   # 归位偏移 (编码器单位)
+    range_min: int       # 运动范围最小值 (编码器单位)
+    range_max: int       # 运动范围最大值 (编码器单位)</code></pre>
+
+<h3 id="54-feetech-总线独有特性">5.4 Feetech 总线独有特性</h3>
+
+<pre><code>class FeetechMotorsBus(SerialMotorsBus):
+    # Feetech STS3215 特殊地址:
+    #   Homing_Offset: 地址 31, 2 字节
+    #   Min_Position_Limit: 地址 9, 2 字节
+    #   Max_Position_Limit: 地址 11, 2 字节
+    #   编码器范围: 0 ~ 4095
+
+    def is_calibrated(self) -&gt; bool:
+        # 比较本地缓存 vs 电机 EEPROM 中的值
+        # homing_offset, range_min, range_max 必须匹配</code></pre>
+
+<h3 id="55-标定-gui">5.5 标定 GUI</h3>
+
+<p><strong>文件</strong>: <code>src/lerobot/motors/calibration_gui.py</code></p>
+
+<p>提供了一个基于 Pygame 的图形化标定工具，可以：</p>
+<ul>
+<li>实时显示各关节位置</li>
+<li>拖拽调整 min/max 限制</li>
+<li>支持分组电机标定</li>
+<li>保存/加载标定文件</li>
+</ul>
+
+<hr>
+
+<h2 id="6-标定数据持久化">6. 标定数据持久化</h2>
+
+<h3 id="61-双层存储">6.1 双层存储</h3>
+
+<p>标定数据同时存储在：</p>
+
+<ol>
+<li><strong>电机 EEPROM</strong>（非易失性）:</li>
+</ol>
+<ul>
+<li>Homing Offset, Min/Max Position Limit</li>
+<li>断电后保留，跟随硬件</li>
+</ul>
+
+<ol>
+<li><strong>本地 JSON 文件</strong>:</li>
+</ol>
+<pre><code>   {
+       &quot;shoulder_pan&quot;: {
+           &quot;id&quot;: 1,
+           &quot;drive_mode&quot;: 0,
+           &quot;homing_offset&quot;: 2048,
+           &quot;range_min&quot;: 0,
+           &quot;range_max&quot;: 4095
+       },
+       &quot;shoulder_lift&quot;: { ... },
+       ...
+   }</code></pre>
+<p>路径: <code>$HF<em>LEROBOT</em>HOME/calibration/&lt;device<em>type&gt;/&lt;device</em>name&gt;/&lt;id&gt;.json</code></p>
+
+<h3 id="62-首次连接流程">6.2 首次连接流程</h3>
+
+<pre><code>首次连接:
+  connect()
+    → bus.connect()      # 建立串口通信
+    → bus.is_calibrated  # 检查 EEPROM 标定状态
+    → False → calibrate() # 自动触发标定
+       → set_half_turn_homings()    # 设置零点
+       → record_ranges_of_motion()  # 记录范围
+       → _save_calibration()        # 保存 JSON
+
+后续连接:
+  connect()
+    → bus.connect()
+    → bus.is_calibrated  # True
+    → _load_calibration() # 从 JSON 加载已有的标定参数
+    → 不触发 calibrate()</code></pre>
+
+<hr>
+
+<h2 id="附录关键文件索引">附录：关键文件索引</h2>
+
+<table>
+<thead><tr>
+<th style="text-align:left">功能</th>
+<th style="text-align:left">文件</th>
+</tr></thead>
+<tbody>
+<tr>
+<td style="text-align:left">标定入口</td>
+<td style="text-align:left"><code>src/lerobot/scripts/lerobot_calibrate.py</code></td>
+</tr>
+<tr>
+<td style="text-align:left">Robot 基类</td>
+<td style="text-align:left"><code>src/lerobot/robots/robot.py</code> — <code>connect()</code>, <code>calibrate()</code>, <code>is_calibrated</code></td>
+</tr>
+<tr>
+<td style="text-align:left">SO100 Follower</td>
+<td style="text-align:left"><code>src/lerobot/robots/so<em>follower/so</em>follower.py</code> — <code>calibrate()</code></td>
+</tr>
+<tr>
+<td style="text-align:left">SO100 Leader</td>
+<td style="text-align:left"><code>src/lerobot/teleoperators/so<em>leader/so</em>leader.py</code> — <code>calibrate()</code></td>
+</tr>
+<tr>
+<td style="text-align:left">电机总线基类</td>
+<td style="text-align:left"><code>src/lerobot/motors/motors_bus.py</code> — <code>SerialMotorsBus</code></td>
+</tr>
+<tr>
+<td style="text-align:left">Feetech 总线</td>
+<td style="text-align:left"><code>src/lerobot/motors/feetech/feetech.py</code> — <code>FeetechMotorsBus</code></td>
+</tr>
+<tr>
+<td style="text-align:left">电机寄存器表</td>
+<td style="text-align:left"><code>src/lerobot/motors/feetech/tables.py</code></td>
+</tr>
+<tr>
+<td style="text-align:left">标定 GUI</td>
+<td style="text-align:left"><code>src/lerobot/motors/calibration_gui.py</code></td>
+</tr>
+<tr>
+<td style="text-align:left">编码工具</td>
+<td style="text-align:left"><code>src/lerobot/motors/encoding_utils.py</code></td>
+</tr>
+</tbody></table>
+
+</body>
+</html>

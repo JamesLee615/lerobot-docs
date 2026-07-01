@@ -1,0 +1,790 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>LeRobot 遥操作（Teleoperation）实现详解</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    line-height: 1.7; color: #24292e; background: #fff;
+    max-width: 800px; margin: 0 auto; padding: 16px;
+    font-size: 16px;
+}
+h1 { font-size: 1.8em; border-bottom: 2px solid #e1e4e8; padding-bottom: 0.3em; margin: 24px 0 16px; }
+h2 { font-size: 1.45em; border-bottom: 1px solid #e1e4e8; padding-bottom: 0.3em; margin: 24px 0 16px; }
+h3 { font-size: 1.25em; margin: 24px 0 16px; }
+h4 { font-size: 1.1em; margin: 24px 0 16px; }
+p { margin: 0 0 16px; }
+a { color: #0366d6; text-decoration: none; }
+a:hover { text-decoration: underline; }
+code {
+    background: #f6f8fa; padding: 2px 6px; border-radius: 4px;
+    font-family: 'SF Mono', 'Fira Code', monospace; font-size: 0.9em;
+}
+pre {
+    background: #f6f8fa; padding: 16px; border-radius: 6px;
+    overflow-x: auto; margin: 0 0 16px; line-height: 1.45;
+}
+pre code { background: none; padding: 0; }
+blockquote {
+    border-left: 4px solid #dfe2e5; padding: 0 16px; color: #6a737d; margin: 0 0 16px;
+}
+table { border-collapse: collapse; width: 100%; margin: 0 0 16px; }
+th, td { border: 1px solid #dfe2e5; padding: 8px 12px; text-align: left; }
+th { background: #f6f8fa; font-weight: 600; }
+tr:nth-child(even) { background: #f6f8fa; }
+ul, ol { padding-left: 2em; margin: 0 0 16px; }
+li { margin: 4px 0; }
+img { max-width: 100%; }
+hr { border: none; border-top: 1px solid #e1e4e8; margin: 24px 0; }
+strong { font-weight: 600; }
+.index-list { list-style: none; padding: 0; }
+.index-list li { margin: 12px 0; padding: 12px 16px; background: #f6f8fa; border-radius: 8px; }
+.index-list a { font-size: 1.1em; font-weight: 500; }
+.back-link { display: inline-block; margin-bottom: 16px; color: #586069; font-size: 0.9em; }
+</style>
+</head>
+<body>
+<a class="back-link" href="index.html">← 返回索引</a>
+<h1 id="lerobot-遥操作teleoperation实现详解">LeRobot 遥操作（Teleoperation）实现详解</h1>
+
+<blockquote>基于 <code>src/lerobot/scripts/lerobot_teleoperate.py</code>（254行）的逐行分析，结合相关核心模块，全面解析遥操作的架构设计与实现原理。</blockquote>
+
+<hr>
+
+<h2 id="目录">目录</h2>
+
+<ol>
+<li><a href="#1-整体架构概览">整体架构概览</a></li>
+<li><a href="#2-入口与配置解析">入口与配置解析</a></li>
+<li><a href="#3-核心配置teleoperateconfig">核心配置：TeleoperateConfig</a></li>
+<li><a href="#4-主控制循环teleop<em>loop">主控制循环：teleop</em>loop</a></li>
+<li><a href="#5-初始化和编排teleoperate">初始化和编排：teleoperate</a></li>
+<li><a href="#6-抽象基类robot-与-teleoperator">抽象基类：Robot 与 Teleoperator</a></li>
+<li><a href="#7-处理器管道系统">处理器管道系统</a></li>
+<li><a href="#8-具体实现案例so-100101">具体实现案例：SO-100/101</a></li>
+<li><a href="#9-cli-命令行接口">CLI 命令行接口</a></li>
+<li><a href="#10-数据流总结">数据流总结</a></li>
+</ol>
+
+<hr>
+
+<h2 id="1-整体架构概览">1. 整体架构概览</h2>
+
+<p>遥操作系统的核心思想是：<strong>操作者通过一个 Leader 设备（遥操作器）发出动作指令，Follower 机器人实时跟随执行</strong>。整个系统采用三层架构：</p>
+
+<pre><code>┌──────────────────────────────────────────────────────┐
+│                    CLI Layer                          │
+│  draccus + parser.wrap() → TeleoperateConfig         │
+├──────────────────────────────────────────────────────┤
+│                   Domain Layer                        │
+│  ┌──────────────┐    ┌──────────────┐                │
+│  │ Teleoperator │    │    Robot     │                │
+│  │  (Leader)    │    │  (Follower)  │                │
+│  │  get_action()│    │ send_action()│                │
+│  └──────┬───────┘    └──────┬───────┘                │
+│         │                   │                        │
+│  ┌──────┴───────────────────┴───────┐                │
+│  │       Processor Pipelines        │                │
+│  │  (teleop → robot action bridge)  │                │
+│  └──────────────────────────────────┘                │
+├──────────────────────────────────────────────────────┤
+│                   Loop Layer                          │
+│  teleop_loop(): 读取 → 处理 → 发送 → 显示（循环）     │
+└──────────────────────────────────────────────────────┘</code></pre>
+
+<p><strong>文件位置：</strong> <a href="src/lerobot/scripts/lerobot<em>teleoperate.py">lerobot</em>teleoperate.py</a></p>
+
+<hr>
+
+<h2 id="2-入口与配置解析">2. 入口与配置解析</h2>
+
+<h3 id="21-main-函数第-248-251-行">2.1 <code>main()</code> 函数（第 248-251 行）</h3>
+
+<pre><code>def main():
+    register_third_party_plugins()  # 注册第三方插件
+    teleoperate()                    # 启动遥操作</code></pre>
+
+<p>这是程序的真正入口，做了两件事：</p>
+
+<ol>
+<li><strong>注册第三方插件</strong>：调用 <code>register<em>third</em>party_plugins()</code> 加载外部插件包，允许第三方扩展新的机器人类型和遥操作器类型（通过 Python 的包发现机制）。</li>
+<li><strong>调用遥操作主函数</strong>：进入 <code>teleoperate()</code>。</li>
+</ol>
+
+<h3 id="22-parserwrap-装饰器第-208-行">2.2 <code>@parser.wrap()</code> 装饰器（第 208 行）</h3>
+
+<pre><code>@parser.wrap()
+def teleoperate(cfg: TeleoperateConfig):</code></pre>
+
+<p><code>parser.wrap()</code> 是 LeRobot 对 <code>draccus</code> 库的封装（见 <a href="src/lerobot/configs/parser.py">configs/parser.py</a>），它做了三件关键的事：</p>
+
+<ol>
+<li><strong>自动解析 CLI 参数</strong>：将命令行参数（如 <code>--robot.type=so101_follower</code>）自动映射到 <code>TeleoperateConfig</code> 数据类的嵌套字段上。</li>
+<li><strong>加载插件</strong>：在解析配置之前，先扫描 CLI 中的 <code>--*.discover<em>packages</em>path=</code> 参数，加载指定的第三方插件包，使得插件的配置子类能被 draccus 识别。</li>
+<li><strong>支持 Hub 加载</strong>：如果提供了 <code>--config<em>path</code> 参数且配置类有 <code>from</em>pretrained</code> 方法，则从 Hugging Face Hub 加载预训练配置。</li>
+</ol>
+
+<p>draccus 的核心能力是：通过 <code>--robot.type=so101_follower</code> 这样的 CLI 参数，自动从注册的子类中选择正确的 <code>RobotConfig</code> 子类（如 <code>SOFollowerRobotConfig</code>）来实例化。</p>
+
+<hr>
+
+<h2 id="3-核心配置teleoperateconfig">3. 核心配置：TeleoperateConfig</h2>
+
+<p><strong>位置：</strong> 第 109-124 行</p>
+
+<pre><code>@dataclass
+class TeleoperateConfig:
+    teleop: TeleoperatorConfig      # 遥操作器（Leader）配置
+    robot: RobotConfig              # 机器人（Follower）配置
+    fps: int = 60                   # 控制循环最大帧率
+    teleop_time_s: float | None = None  # 最大运行时长（None=无限）
+    display_data: bool = False      # 是否显示数据
+    display_ip: str | None = None   # Rerun 远程服务器 IP
+    display_port: int | None = None # Rerun 远程服务器端口
+    display_compressed_images: bool = False  # 是否压缩显示图像</code></pre>
+
+<h3 id="字段详解">字段详解</h3>
+
+<table>
+<thead><tr>
+<th style="text-align:left">字段</th>
+<th style="text-align:left">类型</th>
+<th style="text-align:left">默认值</th>
+<th style="text-align:left">说明</th>
+</tr></thead>
+<tbody>
+<tr>
+<td style="text-align:left"><code>teleop</code></td>
+<td style="text-align:left"><code>TeleoperatorConfig</code></td>
+<td style="text-align:left">必填</td>
+<td style="text-align:left">Leader 设备的完整配置（类型、端口、ID、相机等）</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>robot</code></td>
+<td style="text-align:left"><code>RobotConfig</code></td>
+<td style="text-align:left">必填</td>
+<td style="text-align:left">Follower 机器人的完整配置（类型、端口、ID、相机等）</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>fps</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>60</code></td>
+<td style="text-align:left">控制循环的目标频率，循环会尝试以这个频率运行</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>teleop<em>time</em>s</code></td>
+<td style="text-align:left">`float \</td>
+<td style="text-align:left">None`</td>
+<td style="text-align:left"><code>None</code></td>
+<td style="text-align:left">遥操作持续时间限制，<code>None</code> 表示无限运行直到手动中断</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>display_data</code></td>
+<td style="text-align:left"><code>bool</code></td>
+<td style="text-align:left"><code>False</code></td>
+<td style="text-align:left">是否在终端和 Rerun 中可视化机器人的观测和动作</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>display_ip</code></td>
+<td style="text-align:left">`str \</td>
+<td style="text-align:left">None`</td>
+<td style="text-align:left"><code>None</code></td>
+<td style="text-align:left">远程 Rerun 可视化服务器的 IP 地址</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>display_port</code></td>
+<td style="text-align:left">`int \</td>
+<td style="text-align:left">None`</td>
+<td style="text-align:left"><code>None</code></td>
+<td style="text-align:left">远程 Rerun 可视化服务器的端口</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>display<em>compressed</em>images</code></td>
+<td style="text-align:left"><code>bool</code></td>
+<td style="text-align:left"><code>False</code></td>
+<td style="text-align:left">是否在发送到 Rerun 前压缩图像（远程显示时自动启用）</td>
+</tr>
+</tbody></table>
+
+<p><code>TeleoperatorConfig</code> 和 <code>RobotConfig</code> 都是通过 draccus 的多态机制实现的可扩展配置基类，具体类型由 CLI 的 <code>.type</code> 参数决定。</p>
+
+<hr>
+
+<h2 id="4-主控制循环teleop_loop">4. 主控制循环：teleop_loop</h2>
+
+<p><strong>位置：</strong> 第 127-205 行</p>
+
+<p>这是整个遥操作系统的核心，是一个<strong>固定频率的实时控制循环</strong>。</p>
+
+<h3 id="41-函数签名">4.1 函数签名</h3>
+
+<pre><code>def teleop_loop(
+    teleop: Teleoperator,                           # Leader 设备实例
+    robot: Robot,                                    # Follower 机器人实例
+    fps: int,                                        # 目标帧率
+    teleop_action_processor: RobotProcessorPipeline,  # 遥操作动作处理器
+    robot_action_processor: RobotProcessorPipeline,   # 机器人动作处理器
+    robot_observation_processor: RobotProcessorPipeline, # 观测处理器
+    display_data: bool = False,                      # 是否显示数据
+    duration: float | None = None,                   # 最大运行时长
+    display_compressed_images: bool = False,          # 是否压缩图像
+):</code></pre>
+
+<h3 id="42-循环体逐步解析">4.2 循环体逐步解析</h3>
+
+<pre><code>┌──────────────────────────────────────────────┐
+│            teleop_loop() 循环体               │
+│                                              │
+│  1. loop_start = time.perf_counter()         │  ← 记录循环开始时间
+│           │                                  │
+│  2. obs = robot.get_observation()            │  ← 获取机器人当前状态
+│           │                                  │     (关节角度、相机图像等)
+│  3. [unitree_g1] teleop.send_feedback(obs)   │  ← 特殊机器人：发送力反馈
+│           │                                  │
+│  4. raw_action = teleop.get_action()         │  ← 读取 Leader 设备动作
+│           │                                  │     (操作者的手部位置)
+│  5. teleop_action = teleop_action_processor  │  ← 处理遥操作动作
+│           │         ((raw_action, obs))      │     (默认：恒等变换)
+│  6. robot_action = robot_action_processor    │  ← 转换为机器人可执行动作
+│           │         ((teleop_action, obs))   │     (默认：恒等变换)
+│  7. robot.send_action(robot_action)          │  ← 发送动作到机器人执行
+│           │                                  │
+│  8. [if display_data]                        │  ← 可选：可视化
+│     - obs_transition = observation_processor │     处理观测数据
+│     - log_rerun_data(obs, action)            │     发送到 Rerun 可视化
+│     - print 动作值到终端                      │     终端显示
+│           │                                  │
+│  9. precise_sleep(1/fps - dt_s)              │  ← 精确帧率控制
+│           │                                  │
+│  10. 检查是否超时 → break                     │
+└──────────────────────────────────────────────┘</code></pre>
+
+<h3 id="43-关键设计细节">4.3 关键设计细节</h3>
+
+<h4 id="a-观测获取第-164-行">(a) 观测获取（第 164 行）</h4>
+<pre><code>obs = robot.get_observation()</code></pre>
+<p>在每轮循环开始时先获取机器人的当前观测（包括关节角度、速度、相机图像等）。注释明确指出：<strong>目前主要用于可视化</strong>，默认的遥操作动作处理器（<code>IdentityProcessorStep</code>）可以接受 <code>None</code> 作为观测输入。</p>
+
+<h4 id="b-unitree-g1-的特殊处理第-166-167-行">(b) Unitree G1 的特殊处理（第 166-167 行）</h4>
+<pre><code>if robot.name == &quot;unitree_g1&quot;:
+    teleop.send_feedback(obs)</code></pre>
+<p>对于 Unitree G1 这种人形机器人，遥操作器需要接收来自机器人的<strong>力反馈</strong>数据，实现双向控制。这是唯一有此需求的机器人类型。</p>
+
+<h4 id="c-三级处理器管道第-170-176-行">(c) 三级处理器管道（第 170-176 行）</h4>
+<pre><code>raw_action = teleop.get_action()                                     # 从 Leader 读取原始动作
+teleop_action = teleop_action_processor((raw_action, obs))           # 处理遥操作动作
+robot_action_to_send = robot_action_processor((teleop_action, obs))  # 转换为机器人动作</code></pre>
+
+<p>这是整个架构中最精妙的设计——<strong>三级处理管道</strong>：</p>
+
+<table>
+<thead><tr>
+<th style="text-align:left">管道</th>
+<th style="text-align:left">输入</th>
+<th style="text-align:left">输出</th>
+<th style="text-align:left">默认行为</th>
+</tr></thead>
+<tbody>
+<tr>
+<td style="text-align:left"><code>teleop<em>action</em>processor</code></td>
+<td style="text-align:left"><code>(raw_action, obs)</code></td>
+<td style="text-align:left">处理后的动作</td>
+<td style="text-align:left">恒等变换</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>robot<em>action</em>processor</code></td>
+<td style="text-align:left"><code>(teleop_action, obs)</code></td>
+<td style="text-align:left">机器人可执行动作</td>
+<td style="text-align:left">恒等变换</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>robot<em>observation</em>processor</code></td>
+<td style="text-align:left"><code>obs</code></td>
+<td style="text-align:left">处理后的观测</td>
+<td style="text-align:left">恒等变换</td>
+</tr>
+</tbody></table>
+
+<p>默认的三个处理器都是 <code>IdentityProcessorStep</code>（恒等变换），意味着 Leader 的动作<strong>直接映射</strong>到 Follower。但系统预留了扩展点，允许：</p>
+<ul>
+<li><strong>动作空间映射</strong>：Leader 和 Follower 关节结构不同时进行映射</li>
+<li><strong>归一化/反归一化</strong>：不同数值范围之间的转换</li>
+<li><strong>Delta 动作转换</strong>：从绝对位置转为增量位置</li>
+</ul>
+
+<h4 id="d-可视化第-181-196-行">(d) 可视化（第 181-196 行）</h4>
+<pre><code>if display_data:
+    obs_transition = robot_observation_processor(obs)
+    log_rerun_data(observation=obs_transition, action=teleop_action, ...)
+    # 终端打印动作值
+    for motor, value in robot_action_to_send.items():
+        print(f&quot;{motor:&lt;{display_len}} | {value:&gt;7.2f}&quot;)
+    move_cursor_up(len(robot_action_to_send) + 3)</code></pre>
+
+<ul>
+<li>使用 <strong>Rerun</strong>（一个实时可视化工具）显示观测和动作数据</li>
+<li>终端中使用 <code>move<em>cursor</em>up</code> 实现<strong>原地刷新</strong>效果，避免滚动刷屏</li>
+<li>支持本地和远程 Rerun 服务器</li>
+</ul>
+
+<h4 id="e-精确帧率控制第-199-行">(e) 精确帧率控制（第 199 行）</h4>
+<pre><code>dt_s = time.perf_counter() - loop_start
+precise_sleep(max(1 / fps - dt_s, 0.0))</code></pre>
+
+<p>使用 <a href="src/lerobot/utils/robot<em>utils.py">precise</em>sleep</a> 而非 <code>time.sleep</code>：</p>
+<ul>
+<li><strong>spin_threshold=10ms</strong>：剩余时间 ≤10ms 时，使用忙等待（自旋）保证精度</li>
+<li><strong>sleep_margin=5ms</strong>：需要 sleep 超过 5ms 时，提前 5ms 唤醒再用自旋补足</li>
+<li>优先保证时序精度而非 CPU 占用率</li>
+</ul>
+
+<h4 id="f-超时控制第-204-205-行">(f) 超时控制（第 204-205 行）</h4>
+<pre><code>if duration is not None and time.perf_counter() - start &gt;= duration:
+    return</code></pre>
+
+<hr>
+
+<h2 id="5-初始化和编排teleoperate">5. 初始化和编排：teleoperate</h2>
+
+<p><strong>位置：</strong> 第 208-245 行</p>
+
+<pre><code>@parser.wrap()
+def teleoperate(cfg: TeleoperateConfig):
+    # 1. 初始化日志
+    init_logging()
+    
+    # 2. 初始化 Rerun 可视化（如果启用）
+    if cfg.display_data:
+        init_rerun(session_name=&quot;teleoperation&quot;, ip=cfg.display_ip, port=cfg.display_port)
+    
+    # 3. 远程显示时自动启用图像压缩
+    display_compressed_images = (
+        True if (cfg.display_data and cfg.display_ip is not None and cfg.display_port is not None)
+        else cfg.display_compressed_images
+    )
+    
+    # 4. 工厂方法创建实例
+    teleop = make_teleoperator_from_config(cfg.teleop)  # 创建 Leader
+    robot = make_robot_from_config(cfg.robot)            # 创建 Follower
+    
+    # 5. 创建默认处理器管道
+    teleop_action_processor, robot_action_processor, robot_observation_processor = make_default_processors()
+    
+    # 6. 连接设备
+    teleop.connect()
+    robot.connect()
+    
+    # 7. 运行主循环（带异常保护）
+    try:
+        teleop_loop(...)
+    except KeyboardInterrupt:
+        pass  # 优雅地处理 Ctrl+C
+    finally:
+        # 8. 清理资源
+        if cfg.display_data:
+            rr.rerun_shutdown()
+        teleop.disconnect()
+        robot.disconnect()</code></pre>
+
+<h3 id="关键步骤解析">关键步骤解析</h3>
+
+<h4 id="工厂方法模式">工厂方法模式</h4>
+<pre><code>teleop = make_teleoperator_from_config(cfg.teleop)
+robot = make_robot_from_config(cfg.robot)</code></pre>
+
+<p>这两个工厂函数根据配置中的 <code>.type</code> 字段动态选择正确的子类：</p>
+<ul>
+<li><code>--teleop.type=so101_leader</code> → 创建 <code>SOLeader</code> 实例</li>
+<li><code>--robot.type=so101_follower</code> → 创建 <code>SOFollower</code> 实例</li>
+</ul>
+
+<p>这种设计使得系统<strong>高度可扩展</strong>——添加新机器人只需实现 <code>Robot</code> 子类并注册即可。</p>
+
+<h4 id="资源管理">资源管理</h4>
+<p>使用 <code>try/finally</code> 确保无论正常退出还是异常中断，都会：</p>
+<ol>
+<li>关闭 Rerun 可视化连接</li>
+<li>断开 Teleoperator 连接（释放串口等资源）</li>
+<li>断开 Robot 连接（释放串口等资源）</li>
+</ol>
+
+<hr>
+
+<h2 id="6-抽象基类robot-与-teleoperator">6. 抽象基类：Robot 与 Teleoperator</h2>
+
+<h3 id="61-robot-抽象基类">6.1 Robot 抽象基类</h3>
+
+<p><strong>位置：</strong> <a href="src/lerobot/robots/robot.py">robots/robot.py</a>（212 行）</p>
+
+<p>定义了所有 LeRobot 兼容机器人的标准接口：</p>
+
+<table>
+<thead><tr>
+<th style="text-align:left">抽象方法</th>
+<th style="text-align:left">说明</th>
+</tr></thead>
+<tbody>
+<tr>
+<td style="text-align:left"><code>observation_features</code></td>
+<td style="text-align:left">返回观测数据的结构描述（类型和形状）</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>action_features</code></td>
+<td style="text-align:left">返回动作数据的结构描述</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>is_connected</code></td>
+<td style="text-align:left">是否已连接</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>connect(calibrate=True)</code></td>
+<td style="text-align:left">建立通信连接，可选自动校准</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>is_calibrated</code></td>
+<td style="text-align:left">是否已校准</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>calibrate()</code></td>
+<td style="text-align:left">执行校准（采集电机偏移量等）</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>configure()</code></td>
+<td style="text-align:left">运行时配置（设置控制模式等）</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>get_observation()</code></td>
+<td style="text-align:left">获取当前观测 → <code>RobotObservation</code></td>
+</tr>
+<tr>
+<td style="text-align:left"><code>send_action(action)</code></td>
+<td style="text-align:left">发送动作指令 → <code>RobotAction</code></td>
+</tr>
+<tr>
+<td style="text-align:left"><code>disconnect()</code></td>
+<td style="text-align:left">断开连接并清理资源</td>
+</tr>
+</tbody></table>
+
+<p><strong>校准机制</strong>：</p>
+<ul>
+<li>校准数据以 JSON 格式存储在 <code>~/.cache/huggingface/lerobot/calibration/robots/{name}/{id}.json</code></li>
+<li>包含每个电机的偏移量、方向等 <code>MotorCalibration</code> 数据</li>
+</ul>
+
+<h3 id="62-teleoperator-抽象基类">6.2 Teleoperator 抽象基类</h3>
+
+<p><strong>位置：</strong> <a href="src/lerobot/teleoperators/teleoperator.py">teleoperators/teleoperator.py</a>（209 行）</p>
+
+<p>与 <code>Robot</code> 接口高度对称，但语义略有不同：</p>
+
+<table>
+<thead><tr>
+<th style="text-align:left">抽象方法</th>
+<th style="text-align:left">说明</th>
+</tr></thead>
+<tbody>
+<tr>
+<td style="text-align:left"><code>action_features</code></td>
+<td style="text-align:left">返回产生的动作的结构描述</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>feedback_features</code></td>
+<td style="text-align:left">返回期望的反馈数据的结构描述</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>is_connected</code></td>
+<td style="text-align:left">是否已连接</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>connect(calibrate=True)</code></td>
+<td style="text-align:left">建立通信连接</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>is_calibrated</code></td>
+<td style="text-align:left">是否已校准</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>calibrate()</code></td>
+<td style="text-align:left">执行校准</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>configure()</code></td>
+<td style="text-align:left">运行时配置</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>get_action()</code></td>
+<td style="text-align:left"><strong>读取操作者的动作</strong> → <code>RobotAction</code></td>
+</tr>
+<tr>
+<td style="text-align:left"><code>send_feedback(feedback)</code></td>
+<td style="text-align:left"><strong>向 Leader 发送力反馈</strong>（仅 Unitree G1 等需要）</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>disconnect()</code></td>
+<td style="text-align:left">断开连接</td>
+</tr>
+</tbody></table>
+
+<h3 id="63-robot-与-teleoperator-的异同">6.3 Robot 与 Teleoperator 的异同</h3>
+
+<pre><code>                Robot (Follower)              Teleoperator (Leader)
+                ─────────────────             ────────────────────
+数据流向:       接收动作 → 执行                读取操作者 → 产生动作
+核心方法:       send_action(action)           get_action()
+辅助方法:       get_observation()             send_feedback(obs) [可选]
+校准:           电机零点/方向校准              电机零点/方向校准
+共性:           都通过串口/USB 与 Feetech 等电机总线通信</code></pre>
+
+<hr>
+
+<h2 id="7-处理器管道系统">7. 处理器管道系统</h2>
+
+<p><strong>位置：</strong> <a href="src/lerobot/processor/">processor/</a> 目录</p>
+
+<h3 id="71-设计动机">7.1 设计动机</h3>
+
+<p>Leader 和 Follower 可能具有：</p>
+<ul>
+<li><strong>不同的关节数量和名称</strong>（如 5 关节 Leader → 6 关节 Follower）</li>
+<li><strong>不同的数值范围</strong>（如 Leader 返回 <code>[-1,1]</code>，Follower 需要 <code>[0,4095]</code>）</li>
+<li><strong>不同的动作模式</strong>（绝对位置 vs 增量位置）</li>
+</ul>
+
+<p>处理器管道负责在这些差异之间架设桥梁。</p>
+
+<h3 id="72-pipeline-架构">7.2 Pipeline 架构</h3>
+
+<pre><code>输入 (TInput)
+    │
+    ▼
+┌──────────────┐
+│ to_transition │  ← 将输入转换为统一的 Transition 格式
+└──────┬───────┘
+       │
+       ▼
+┌──────────────┐
+│   Step 1     │  ← 有序的 ProcessorStep 列表
+├──────────────┤
+│   Step 2     │
+├──────────────┤
+│   Step N     │
+└──────┬───────┘
+       │
+       ▼
+┌──────────────┐
+│  to_output   │  ← 将 Transition 转换为输出格式
+└──────┬───────┘
+       │
+       ▼
+输出 (TOutput)</code></pre>
+
+<h3 id="73-默认处理器">7.3 默认处理器</h3>
+
+<p><strong>位置：</strong> <a href="src/lerobot/processor/factory.py">processor/factory.py</a></p>
+
+<pre><code>def make_default_processors():
+    teleop_action_processor = make_default_teleop_action_processor()
+    robot_action_processor = make_default_robot_action_processor()
+    robot_observation_processor = make_default_robot_observation_processor()
+    return (teleop_action_processor, robot_action_processor, robot_observation_processor)</code></pre>
+
+<p>三个默认处理器都只包含一个 <code>IdentityProcessorStep</code>（不做任何变换），意味着在<strong>最简单的情况下</strong>（如同构的 SO Leader/Follower 对），动作从 Leader 直接传递到 Follower。</p>
+
+<h3 id="74-可用的-processorstep-类型">7.4 可用的 ProcessorStep 类型</h3>
+
+<table>
+<thead><tr>
+<th style="text-align:left">处理器</th>
+<th style="text-align:left">功能</th>
+</tr></thead>
+<tbody>
+<tr>
+<td style="text-align:left"><code>IdentityProcessorStep</code></td>
+<td style="text-align:left">恒等变换（什么都不做）</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>NormalizerProcessorStep</code></td>
+<td style="text-align:left">数据归一化</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>UnnormalizerProcessorStep</code></td>
+<td style="text-align:left">数据反归一化</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>MapDeltaActionToRobotActionStep</code></td>
+<td style="text-align:left">Delta 动作 → 绝对位置</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>MapTensorToDeltaActionDictStep</code></td>
+<td style="text-align:left">张量格式 → Delta 字典</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>VanillaObservationProcessorStep</code></td>
+<td style="text-align:left">标准观测处理</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>DeviceProcessorStep</code></td>
+<td style="text-align:left">设备间数据传输（CPU↔GPU）</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>AddBatchDimensionProcessorStep</code></td>
+<td style="text-align:left">添加批次维度</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>RenameObservationsProcessorStep</code></td>
+<td style="text-align:left">重命名观测字段</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>ActionTokenizerProcessorStep</code></td>
+<td style="text-align:left">动作分词</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>ImageCropResizeProcessorStep</code></td>
+<td style="text-align:left">图像裁剪/缩放</td>
+</tr>
+</tbody></table>
+
+<p>所有 ProcessorStep 通过 <code>ProcessorStepRegistry</code> 注册，支持按名称动态实例化。</p>
+
+<hr>
+
+<h2 id="8-具体实现案例so-100101">8. 具体实现案例：SO-100/101</h2>
+
+<h3 id="81-sofollowerfollower-机器人">8.1 SOFollower（Follower 机器人）</h3>
+
+<p><strong>位置：</strong> <a href="src/lerobot/robots/so<em>follower/so</em>follower.py">robots/so<em>follower/so</em>follower.py</a></p>
+
+<pre><code>关键特征:
+- 继承自 Robot 基类
+- 使用 FeetechMotorsBus 通过串口与 STS3215 舵机通信
+- 6 个关节: shoulder_pan, shoulder_lift, elbow_flex, wrist_flex, wrist_roll, gripper
+- 支持度数和归一化范围两种模式
+- 可集成相机（OpenCV、RealSense、ZMQ）</code></pre>
+
+<h3 id="82-soleaderleader-遥操作器">8.2 SOLeader（Leader 遥操作器）</h3>
+
+<p><strong>位置：</strong> <a href="src/lerobot/teleoperators/so<em>leader/so</em>leader.py">teleoperators/so<em>leader/so</em>leader.py</a></p>
+
+<pre><code>关键特征:
+- 继承自 Teleoperator 基类
+- 同样使用 FeetechMotorsBus + STS3215 舵机
+- 5 个关节: shoulder_pan, shoulder_lift, elbow_flex, wrist_flex, wrist_roll
+- 读取关节角度作为动作输出（操作者手动拖拽 Leader 臂）</code></pre>
+
+<h3 id="83-leader-follower-映射关系">8.3 Leader-Follower 映射关系</h3>
+
+<pre><code>SO Leader (5 关节)              SO Follower (6 关节)
+┌─────────────────┐             ┌─────────────────────┐
+│ shoulder_pan    │ ──────────→ │ shoulder_pan        │
+│ shoulder_lift   │ ──────────→ │ shoulder_lift       │
+│ elbow_flex      │ ──────────→ │ elbow_flex          │
+│ wrist_flex      │ ──────────→ │ wrist_flex          │
+│ wrist_roll      │ ──────────→ │ wrist_roll          │
+│                 │             │ gripper (独立控制)    │
+└─────────────────┘             └─────────────────────┘
+
+操作者拖拽 Leader 臂 → 关节角度被读取 → 直接映射到 Follower 对应关节</code></pre>
+
+<hr>
+
+<h2 id="9-cli-命令行接口">9. CLI 命令行接口</h2>
+
+<h3 id="91-基本用法">9.1 基本用法</h3>
+
+<pre><code>lerobot-teleoperate \
+    --robot.type=so101_follower \
+    --robot.port=/dev/tty.usbmodem58760431541 \
+    --robot.cameras=&quot;{ front: {type: opencv, index_or_path: 0, width: 1920, height: 1080, fps: 30}}&quot; \
+    --robot.id=black \
+    --teleop.type=so101_leader \
+    --teleop.port=/dev/tty.usbmodem58760431551 \
+    --teleop.id=blue \
+    --display_data=true</code></pre>
+
+<h3 id="92-双臂bimanual用法">9.2 双臂（Bimanual）用法</h3>
+
+<pre><code>lerobot-teleoperate \
+  --robot.type=bi_so_follower \
+  --robot.left_arm_config.port=/dev/tty.usbmodem5A460822851 \
+  --robot.right_arm_config.port=/dev/tty.usbmodem5A460814411 \
+  --robot.id=bimanual_follower \
+  --teleop.type=bi_so_leader \
+  --teleop.left_arm_config.port=/dev/tty.usbmodem5A460852721 \
+  --teleop.right_arm_config.port=/dev/tty.usbmodem5A460819811 \
+  --teleop.id=bimanual_leader \
+  --display_data=true</code></pre>
+
+<h3 id="93-cli-参数解析机制">9.3 CLI 参数解析机制</h3>
+
+<p>使用 <code>.</code> 分隔的嵌套参数语法（由 draccus 提供）：</p>
+<ul>
+<li><code>--robot.type=so101_follower</code> → 设置 <code>config.robot</code> 的具体子类类型</li>
+<li><code>--robot.port=/dev/xxx</code> → 设置 robot 配置中的 <code>port</code> 字段</li>
+<li><code>--robot.cameras=&quot;{...}&quot;</code> → 设置 robot 的相机配置（YAML/JSON 内联语法）</li>
+</ul>
+
+<hr>
+
+<h2 id="10-数据流总结">10. 数据流总结</h2>
+
+<pre><code>                 遥操作数据流全景图
+                 ═══════════════════
+
+  操作者 (Human)
+      │
+      │ 拖拽 Leader 臂
+      ▼
+┌─────────────────┐
+│   Teleoperator  │  teleop.get_action()
+│   (Leader)      │  → 读取关节角度/位置
+└────────┬────────┘
+         │ raw_action: RobotAction
+         │ {&quot;shoulder_pan&quot;: 45.2, &quot;shoulder_lift&quot;: -30.1, ...}
+         ▼
+┌─────────────────┐
+│ teleop_action   │  可选的动作空间变换
+│ _processor      │  (默认: Identity → 不变)
+└────────┬────────┘
+         │ teleop_action (处理后的动作)
+         ▼
+┌─────────────────┐
+│ robot_action    │  可选的动作映射
+│ _processor      │  (默认: Identity → 不变)
+└────────┬────────┘
+         │ robot_action_to_send
+         ▼
+┌─────────────────┐         ┌─────────────────┐
+│   Robot         │ ────→   │  可视化 (Rerun)  │
+│   (Follower)    │  obs    │  + 终端显示      │
+│ send_action()   │         │  (if display)    │
+└────────┬────────┘         └─────────────────┘
+         │
+         │ 舵机执行动作
+         ▼
+  物理机器人运动
+
+  ─────────────────────────────────────────────
+  循环频率: 最高 60 FPS (由 precise_sleep 控制)
+  退出条件: KeyboardInterrupt 或达到 teleop_time_s
+  ─────────────────────────────────────────────</code></pre>
+
+<h3 id="核心设计原则">核心设计原则</h3>
+
+<ol>
+<li><strong>关注点分离</strong>：配置（Config）、设备抽象（Robot/Teleoperator）、处理管道（Processor）、控制循环（Loop）各司其职</li>
+<li><strong>开闭原则</strong>：通过抽象基类和工厂模式，新增机器人/遥操作器类型无需修改核心循环代码</li>
+<li><strong>管道可组合</strong>：处理器步骤可以自由组合，适应不同机器人对之间的映射需求</li>
+<li><strong>精确时序</strong>：使用 <code>precise_sleep</code> 而非 <code>time.sleep</code> 保证控制频率的稳定性</li>
+<li><strong>优雅降级</strong>：<code>try/finally</code> 保证资源总是被释放，<code>KeyboardInterrupt</code> 被静默处理</li>
+</ol>
+
+<hr>
+
+<blockquote><strong>文件路径</strong>: <code>src/lerobot/scripts/lerobot_teleoperate.py</code> <strong>依赖的核心模块</strong>: <code>lerobot.robots</code>, <code>lerobot.teleoperators</code>, <code>lerobot.processor</code>, <code>lerobot.configs.parser</code> <strong>许可证</strong>: Apache 2.0 — Copyright 2024 The HuggingFace Inc. team</blockquote>
+
+</body>
+</html>

@@ -1,0 +1,874 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>LeRobot 框架全面解析</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    line-height: 1.7; color: #24292e; background: #fff;
+    max-width: 800px; margin: 0 auto; padding: 16px;
+    font-size: 16px;
+}
+h1 { font-size: 1.8em; border-bottom: 2px solid #e1e4e8; padding-bottom: 0.3em; margin: 24px 0 16px; }
+h2 { font-size: 1.45em; border-bottom: 1px solid #e1e4e8; padding-bottom: 0.3em; margin: 24px 0 16px; }
+h3 { font-size: 1.25em; margin: 24px 0 16px; }
+h4 { font-size: 1.1em; margin: 24px 0 16px; }
+p { margin: 0 0 16px; }
+a { color: #0366d6; text-decoration: none; }
+a:hover { text-decoration: underline; }
+code {
+    background: #f6f8fa; padding: 2px 6px; border-radius: 4px;
+    font-family: 'SF Mono', 'Fira Code', monospace; font-size: 0.9em;
+}
+pre {
+    background: #f6f8fa; padding: 16px; border-radius: 6px;
+    overflow-x: auto; margin: 0 0 16px; line-height: 1.45;
+}
+pre code { background: none; padding: 0; }
+blockquote {
+    border-left: 4px solid #dfe2e5; padding: 0 16px; color: #6a737d; margin: 0 0 16px;
+}
+table { border-collapse: collapse; width: 100%; margin: 0 0 16px; }
+th, td { border: 1px solid #dfe2e5; padding: 8px 12px; text-align: left; }
+th { background: #f6f8fa; font-weight: 600; }
+tr:nth-child(even) { background: #f6f8fa; }
+ul, ol { padding-left: 2em; margin: 0 0 16px; }
+li { margin: 4px 0; }
+img { max-width: 100%; }
+hr { border: none; border-top: 1px solid #e1e4e8; margin: 24px 0; }
+strong { font-weight: 600; }
+.index-list { list-style: none; padding: 0; }
+.index-list li { margin: 12px 0; padding: 12px 16px; background: #f6f8fa; border-radius: 8px; }
+.index-list a { font-size: 1.1em; font-weight: 500; }
+.back-link { display: inline-block; margin-bottom: 16px; color: #586069; font-size: 0.9em; }
+</style>
+</head>
+<body>
+<a class="back-link" href="index.html">← 返回索引</a>
+<h1 id="lerobot-框架全面解析">LeRobot 框架全面解析</h1>
+
+<blockquote>基于 LeRobot (含触觉传感器扩展) 代码库的深度分析</blockquote>
+
+<hr>
+
+<h2 id="文档索引">📑 文档索引</h2>
+
+<p>本文件为 LeRobot 框架的总览。以下各主题有独立的详解文档：</p>
+
+<table>
+<thead><tr>
+<th style="text-align:left">主题</th>
+<th style="text-align:left">文件</th>
+<th style="text-align:left">内容</th>
+</tr></thead>
+<tbody>
+<tr>
+<td style="text-align:left">🌐 <strong>框架总览</strong></td>
+<td style="text-align:left"><code>lerobot<em>framework</em>overview.md</code> (本文件)</td>
+<td style="text-align:left">LeRobotDataset 组成、数据集处理流程、模型文件结构</td>
+</tr>
+<tr>
+<td style="text-align:left">🔍 <strong>寻找接口</strong></td>
+<td style="text-align:left"><a href="lerobot<em>find</em>interfaces.md">lerobot<em>find</em>interfaces.md</a></td>
+<td style="text-align:left">发现串口、相机、关节限制</td>
+</tr>
+<tr>
+<td style="text-align:left">📐 <strong>标定</strong></td>
+<td style="text-align:left"><a href="lerobot<em>calibrate.md">lerobot</em>calibrate.md</a></td>
+<td style="text-align:left">电机归位、范围标定、数据持久化</td>
+</tr>
+<tr>
+<td style="text-align:left">🎮 <strong>遥操作</strong></td>
+<td style="text-align:left"><a href="lerobot<em>teleoperate</em>详解.md">lerobot<em>teleoperate</em>详解.md</a></td>
+<td style="text-align:left">主手-从手实时控制循环</td>
+</tr>
+<tr>
+<td style="text-align:left">📹 <strong>记录数据集</strong></td>
+<td style="text-align:left"><a href="lerobot<em>record.md">lerobot</em>record.md</a></td>
+<td style="text-align:left">数据采集、视频编码、episode 管理</td>
+</tr>
+<tr>
+<td style="text-align:left">🏋️ <strong>训练模型</strong></td>
+<td style="text-align:left"><a href="lerobot<em>train.md">lerobot</em>train.md</a></td>
+<td style="text-align:left">离线训练、检查点、分布式训练</td>
+</tr>
+<tr>
+<td style="text-align:left">📊 <strong>评估模型</strong></td>
+<td style="text-align:left"><a href="lerobot<em>eval.md">lerobot</em>eval.md</a></td>
+<td style="text-align:left">rollout、指标聚合、视频录制</td>
+</tr>
+<tr>
+<td style="text-align:left">🧠 <strong>ACT 策略</strong></td>
+<td style="text-align:left"><a href="lerobot<em>act</em>policy.md">lerobot<em>act</em>policy.md</a></td>
+<td style="text-align:left">ACT (Action Chunking Transformer) 完整实现</td>
+</tr>
+<tr>
+<td style="text-align:left">🌀 <strong>Diffusion 策略</strong></td>
+<td style="text-align:left"><a href="lerobot<em>diffusion</em>policy.md">lerobot<em>diffusion</em>policy.md</a></td>
+<td style="text-align:left">Diffusion Policy 完整实现</td>
+</tr>
+</tbody></table>
+
+<hr>
+
+<h2 id="目录">目录</h2>
+
+<ol>
+<li><a href="#1-lerobotdataset-的组成">LeRobotDataset 的组成</a></li>
+<li><a href="#2-完整-pipeline从标定到评估-概述">完整 Pipeline：从标定到评估 (概述)</a></li>
+<li><a href="#3-数据集处理流程">数据集处理流程</a></li>
+<li><a href="#4-outputstrain-模型文件结构">outputs/train 模型文件结构</a></li>
+</ol>
+
+<hr>
+
+<h2 id="1-lerobotdataset-的组成">1. LeRobotDataset 的组成</h2>
+
+<h3 id="11-核心文件结构">1.1 核心文件结构</h3>
+
+<p>LeRobotDataset 在磁盘上的布局如下：</p>
+
+<pre><code>dataset_root/
+├── data/                          # 主数据存储 (parquet 格式)
+│   ├── chunk-000/
+│   │   ├── file-000.parquet       # 每个 parquet 文件包含多帧数据
+│   │   ├── file-001.parquet
+│   │   └── ...
+│   ├── chunk-001/
+│   │   └── ...
+│   └── ...
+├── meta/                          # 元数据
+│   ├── episodes/                  # episode 索引信息
+│   │   ├── chunk-000/
+│   │   │   ├── file-000.parquet
+│   │   │   └── ...
+│   │   └── ...
+│   ├── info.json                  # 数据集信息：特征、形状、fps、视频编码等
+│   ├── stats.json                 # 统计信息 (用于归一化)
+│   └── tasks.parquet              # 任务描述（语言指令）
+└── videos/                        # 视频文件 (可选)
+    ├── observation.images.front/
+    │   ├── chunk-000/
+    │   │   ├── file-000.mp4
+    │   │   └── ...
+    │   └── ...
+    └── observation.images.side/
+        └── ...</code></pre>
+
+<h3 id="12-lerobotdataset-类的核心属性">1.2 LeRobotDataset 类的核心属性</h3>
+
+<pre><code>class LeRobotDataset(torch.utils.data.Dataset):
+    # 核心属性
+    repo_id: str            # HuggingFace Hub 上的数据集 ID
+    root: Path              # 本地存储根目录
+    meta: LeRobotDatasetMetadata  # 元数据管理器
+    hf_dataset: datasets.Dataset  # HuggingFace Dataset 实例 (读取 parquet)
+    delta_timestamps: dict  # 时序偏移查询配置
+    image_transforms: Callable    # 图像增强变换
+    episodes: list[int]     # 加载的 episode 列表 (None = 全部)
+    fps: int                # 数据采集帧率
+    num_frames: int         # 总帧数
+    num_episodes: int       # 总 episode 数
+    features: dict          # 特征定义 (键名 → 类型+形状)</code></pre>
+
+<h3 id="13-数据特征-features-定义">1.3 数据特征 (Features) 定义</h3>
+
+<p>数据集中的 <code>features</code> 字典定义了每条记录包含的数据字段：</p>
+
+<table>
+<thead><tr>
+<th style="text-align:left">特征键名</th>
+<th style="text-align:left">FeatureType</th>
+<th style="text-align:left">含义</th>
+<th style="text-align:left">示例形状</th>
+</tr></thead>
+<tbody>
+<tr>
+<td style="text-align:left"><code>observation.state</code></td>
+<td style="text-align:left">STATE</td>
+<td style="text-align:left">机器人关节角度 (本体感知)</td>
+<td style="text-align:left"><code>[6]</code></td>
+</tr>
+<tr>
+<td style="text-align:left"><code>observation.images.*</code></td>
+<td style="text-align:left">VISUAL</td>
+<td style="text-align:left">相机图像</td>
+<td style="text-align:left"><code>[3, 480, 640]</code></td>
+</tr>
+<tr>
+<td style="text-align:left"><code>observation.tactile.*</code></td>
+<td style="text-align:left">STATE (或TACTILE)</td>
+<td style="text-align:left">触觉传感器数据</td>
+<td style="text-align:left"><code>[12, 32]</code></td>
+</tr>
+<tr>
+<td style="text-align:left"><code>observation.environment_state</code></td>
+<td style="text-align:left">ENV</td>
+<td style="text-align:left">环境状态 (仅仿真)</td>
+<td style="text-align:left">可变</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>action</code></td>
+<td style="text-align:left">ACTION</td>
+<td style="text-align:left">机器人动作 (关节角度)</td>
+<td style="text-align:left"><code>[6]</code></td>
+</tr>
+<tr>
+<td style="text-align:left"><code>timestamp</code></td>
+<td style="text-align:left">标量</td>
+<td style="text-align:left">帧的时间戳</td>
+<td style="text-align:left"><code>[1]</code></td>
+</tr>
+<tr>
+<td style="text-align:left"><code>episode_index</code></td>
+<td style="text-align:left">标量</td>
+<td style="text-align:left">所属 episode 索引</td>
+<td style="text-align:left"><code>[1]</code></td>
+</tr>
+<tr>
+<td style="text-align:left"><code>frame_index</code></td>
+<td style="text-align:left">标量</td>
+<td style="text-align:left">episode 内帧索引</td>
+<td style="text-align:left"><code>[1]</code></td>
+</tr>
+<tr>
+<td style="text-align:left"><code>index</code></td>
+<td style="text-align:left">标量</td>
+<td style="text-align:left">全局帧索引</td>
+<td style="text-align:left"><code>[1]</code></td>
+</tr>
+<tr>
+<td style="text-align:left"><code>task</code></td>
+<td style="text-align:left">字符串</td>
+<td style="text-align:left">任务语言描述</td>
+<td style="text-align:left">标量</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>next.done</code></td>
+<td style="text-align:left">标量</td>
+<td style="text-align:left">episode 是否结束</td>
+<td style="text-align:left"><code>[1]</code></td>
+</tr>
+<tr>
+<td style="text-align:left"><code>action<em>is</em>pad</code></td>
+<td style="text-align:left">布尔</td>
+<td style="text-align:left">action 是否被填充 (padding)</td>
+<td style="text-align:left"><code>[horizon]</code></td>
+</tr>
+</tbody></table>
+
+<h3 id="14-数据类型和存储方式">1.4 数据类型和存储方式</h3>
+
+<ol>
+<li><strong>Parquet 文件</strong>：存储所有非视频数据（状态、动作、时间戳、标量等）。使用 HuggingFace <code>datasets</code> 库加载。</li>
+<li><strong>MP4 视频文件</strong>：存储图像帧。每个 camera key 对应一个视频文件目录，多个 episode 的视频按顺序存储在同一文件中。</li>
+<li><strong>Stats/Info JSON</strong>：存储归一化统计量（mean, std, min, max, quantile 等）。</li>
+<li><strong>归一化映射</strong> (<code>normalization_mapping</code>)：</li>
+</ol>
+<ul>
+<li><code>VISUAL</code> → <code>MEAN_STD</code>（基于 ImageNet 统计或数据集统计的均值-标准差归一化）</li>
+<li><code>STATE</code> → <code>MIN_MAX</code>（最小-最大归一化到 [-1, 1]）</li>
+<li><code>ACTION</code> → <code>MIN_MAX</code></li>
+<li><code>TACTILE</code> → <code>MEAN_STD</code></li>
+</ul>
+
+<h3 id="15-delta-timestamps-机制">1.5 Delta Timestamps 机制</h3>
+
+<p><code>delta<em>timestamps</code> 机制用于从数据集中加载时序相关的帧。每种策略定义自己的 <code>observation</em>delta<em>indices</code> 和 <code>action</em>delta_indices</code>：</p>
+
+<ul>
+<li><strong>Diffusion Policy</strong>：</li>
+<li><code>observation<em>delta</em>indices</code>: <code>[i * frame<em>stride for i in range(1 - n</em>obs<em>steps, 1)]</code>（例如 n</em>obs_steps=2 时为 [-3, 0]）</li>
+<li><code>action<em>delta</em>indices</code>: <code>[i * frame<em>stride for i in range(1 - n</em>obs<em>steps, 1 - n</em>obs_steps + horizon)]</code></li>
+</ul>
+
+<ul>
+<li><strong>ACT Policy</strong>：</li>
+<li><code>observation<em>delta</em>indices</code>: <code>None</code>（仅使用当前帧）</li>
+<li><code>action<em>delta</em>indices</code>: <code>list(range(chunk<em>size))</code>（0 到 chunk</em>size-1）</li>
+</ul>
+
+<p>查询时，<code><em>get</em>query<em>indices</code> 方法根据绝对索引和 delta 值计算出需要查询的帧索引，并进行 episode 边界填充（越界帧用边界值填充并标记 <code>is</em>pad</code>）。</p>
+
+<h3 id="16-数据加载流程-__getitem__">1.6 数据加载流程 (<strong>getitem</strong>)</h3>
+
+<pre><code>__getitem__(idx)
+    │
+    ├── 1. 获取绝对索引和 episode 索引
+    ├── 2. _get_query_indices() → 计算需要查询的帧索引
+    ├── 3. _query_hf_dataset() → 从 hf_dataset (parquet) 查询状态/动作数据
+    ├── 4. _query_videos() → 从 mp4 解码视频帧
+    ├── 5. 合并所有数据为字典
+    │       { &quot;observation.state&quot;: Tensor,
+    │         &quot;observation.images.front&quot;: Tensor,
+    │         &quot;action&quot;: Tensor,
+    │         &quot;action_is_pad&quot;: Tensor,
+    │         ... }
+    └── 6. 应用 image_transforms (如果提供)</code></pre>
+
+<h3 id="17-采样器-episodeawaresampler">1.7 采样器 (EpisodeAwareSampler)</h3>
+
+<p><code>EpisodeAwareSampler</code> 用于 Diffusion Policy 训练时的特殊采样策略：为了丢弃 episode 末尾因 padding 导致的不完整帧，它会从每个 episode 的有效帧中均匀采样 <code>batch<em>size</code> 个起始索引，支持 <code>drop</em>n<em>last</em>frames</code> 参数来丢弃每个 episode 最后的 N 帧。</p>
+
+<hr>
+
+<h2 id="2-完整-pipeline从标定到评估-概述">2. 完整 Pipeline：从标定到评估 (概述)</h2>
+
+<p>LeRobot 的完整工作流程分为 6 个阶段，每个阶段有独立的详解文档：</p>
+
+<h3 id="21-阶段一寻找接口-lerobot_find_interfacesmdlerobot_find_interfacesmd">2.1 阶段一：寻找接口 → 📄 <a href="lerobot<em>find</em>interfaces.md">lerobot<em>find</em>interfaces.md</a></h3>
+
+<p>发现系统中的硬件设备（串口、相机、关节限制）。核心脚本：<code>lerobot<em>find</em>port</code>（差分法检测 USB 串口）、<code>lerobot<em>find</em>cameras</code>（OpenCV + RealSense 相机枚举，支持测试拍照）、<code>lerobot<em>find</em>joint_limits</code>（通过遥操作 + URDF 正运动学记录关节和 EE 工作空间范围）。</p>
+
+<h3 id="22-阶段二标定-lerobot_calibratemdlerobot_calibratemd">2.2 阶段二：标定 → 📄 <a href="lerobot<em>calibrate.md">lerobot</em>calibrate.md</a></h3>
+
+<p>对机器人或遥操作设备执行归位和范围标定。流程：<code>connect(calibrate=False)</code> → <code>calibrate()</code>（set<em>half</em>turn<em>homings + record</em>ranges<em>of</em>motion）。标定数据双层存储于电机 EEPROM 和本地 JSON。核心类：<code>Robot</code> 基类、<code>SerialMotorsBus</code>、<code>FeetechMotorsBus</code>。</p>
+
+<h3 id="23-阶段三遥操作-lerobot_teleoperate_详解mdlerobot_teleoperate_详解md">2.3 阶段三：遥操作 → 📄 <a href="lerobot<em>teleoperate</em>详解.md">lerobot<em>teleoperate</em>详解.md</a></h3>
+
+<p>通过主手设备实时控制从手机器人。核心脚本：<code>lerobot_teleoperate</code>。支持 SO-100、Koch、OpenArm、Gamepad、Keyboard、Homunculus 等多种主手类型。处理器管道执行坐标变换、缩放、镜像等操作。</p>
+
+<h3 id="24-阶段四记录数据集-lerobot_recordmdlerobot_recordmd">2.4 阶段四：记录数据集 → 📄 <a href="lerobot<em>record.md">lerobot</em>record.md</a></h3>
+
+<p>通过遥操作或策略控制机器人并记录所有传感器数据。核心脚本：<code>lerobot_record</code>。支持三种视频编码模式（PNG / Streaming / Batched），数据写入 parquet + mp4。关键类：<code>LeRobotDataset.create()</code>、<code>StreamingVideoEncoder</code>。</p>
+
+<h3 id="25-阶段五训练模型-lerobot_trainmdlerobot_trainmd">2.5 阶段五：训练模型 → 📄 <a href="lerobot<em>train.md">lerobot</em>train.md</a></h3>
+
+<p>使用离线数据集训练模仿学习策略。核心脚本：<code>lerobot<em>train</code>。流程：<code>make</em>dataset → make<em>policy → make</em>pre<em>post</em>processors → DataLoader → Accelerator.prepare → 训练循环 → 检查点保存</code>。支持多 GPU 分布式训练、RA-BC 加权训练、PEFT/LoRA 微调。</p>
+
+<h3 id="26-阶段六评估模型-lerobot_evalmdlerobot_evalmd">2.6 阶段六：评估模型 → 📄 <a href="lerobot<em>eval.md">lerobot</em>eval.md</a></h3>
+
+<p>在仿真环境（或真实机器人）中评估预训练策略。核心脚本：<code>lerobot<em>eval</code>。关键函数：<code>rollout()</code>（单次推演）→ <code>eval</em>policy()</code>（批量评估）→ <code>eval<em>policy</em>all()</code>（多环境聚合）。输出 avg<em>sum</em>reward、pc_success 等指标，可选录制评估视频。</p>
+
+<hr>
+
+<h2 id="3-数据集处理流程">3. 数据集处理流程</h2>
+
+<h3 id="31-数据集工具脚本">3.1 数据集工具脚本</h3>
+
+<p>LeRobot 提供了多个数据集处理工具：</p>
+
+<table>
+<thead><tr>
+<th style="text-align:left">脚本</th>
+<th style="text-align:left">功能</th>
+</tr></thead>
+<tbody>
+<tr>
+<td style="text-align:left"><code>lerobot<em>dataset</em>viz.py</code></td>
+<td style="text-align:left">可视化数据集（图像、状态、动作），支持 rerun 在线可视化</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>lerobot<em>dataset</em>viz_tactile.py</code></td>
+<td style="text-align:left">专门可视化触觉传感器数据</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>lerobot<em>imgtransform</em>viz.py</code></td>
+<td style="text-align:left">预览图像增强效果</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>lerobot<em>edit</em>dataset.py</code></td>
+<td style="text-align:left">编辑数据集（删除 episodes、修改任务描述等）</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>augment<em>dataset</em>quantile_stats.py</code></td>
+<td style="text-align:left">用分位数统计增强数据集 (用于 TDMPC)</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>convert<em>dataset</em>v21<em>to</em>v30.py</code></td>
+<td style="text-align:left">从 v2.1 格式转换到 v3.0 格式</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>compute_stats.py</code> (数据集模块)</td>
+<td style="text-align:left">计算整个数据集的归一化统计量</td>
+</tr>
+</tbody></table>
+
+<h3 id="32-数据集创建流程">3.2 数据集创建流程</h3>
+
+<pre><code>1. 初始化 LeRobotDataset (create 模式)
+   ├── 创建 root 目录结构
+   ├── 初始化 LeRobotDatasetMetadata
+   │   ├── info.json (特征定义，fps，总帧数)
+   │   ├── stats.json (初始化为空)
+   │   └── tasks.parquet
+   ├── 创建 data/ chunk 目录
+   └── 初始化 TypedWriter (parquet 增量写入器)
+
+2. 对每个 episode 记录:
+   ├── add_frame(frame) → 缓冲或直接写入 parquet
+   ├── 可选：实时编码视频帧
+   ├── save_episode(episode_data)
+   │   ├── 更新 meta/episodes 索引
+   │   └── 管理 video encoding batch
+
+3. finalize():
+   ├── 关闭 parquet writer
+   ├── 编码剩余视频 buffer
+   ├── 合并同一 camera key 下的多个小 mp4 文件
+   └── 计算并保存统计量 (compute_episode_stats)</code></pre>
+
+<h3 id="33-数据集加载流程">3.3 数据集加载流程</h3>
+
+<pre><code>LeRobotDataset.__init__(repo_id, root, episodes, ...):
+│
+├── 1. 加载元数据: LeRobotDatasetMetadata
+│       └── 从 meta/info.json 读取特征、fps 等
+│
+├── 2. 加载数据:
+│   ├── 本地存在 → load_hf_dataset()
+│   │   └── datasets.Dataset 加载 parquet 文件
+│   └── 本地不存在 → download(&quot;repo_id&quot;) → load_hf_dataset()
+│
+├── 3. 视频下载 (可选):
+│   └── 下载 videos/ 目录下的 mp4 文件
+│
+├── 4. 构建 episode 索引映射:
+│   └── _absolute_to_relative_idx: 绝对帧索引 → 相对帧索引
+│
+└── 5. Delta Timestamps:
+    └── 如果配置了 delta_timestamps,
+        计算 delta_indices (时序偏移)</code></pre>
+
+<h3 id="34-图像增强-pipeline">3.4 图像增强 Pipeline</h3>
+
+<p>图像增强通过 <code>image_transforms</code> 参数传入，支持标准的 <code>torchvision.transforms.v2</code>。训练配置中可定义：</p>
+
+<pre><code>&quot;image_transforms&quot;: {
+    &quot;enable&quot;: true,
+    &quot;max_num_transforms&quot;: 3,       // 每次最多随机选择 3 个增强
+    &quot;random_order&quot;: false,
+    &quot;tfs&quot;: {
+        &quot;brightness&quot;: {&quot;type&quot;: &quot;ColorJitter&quot;, &quot;weight&quot;: 1.0, &quot;kwargs&quot;: {&quot;brightness&quot;: [0.8, 1.2]}},
+        &quot;contrast&quot;:   {&quot;type&quot;: &quot;ColorJitter&quot;, &quot;weight&quot;: 1.0, &quot;kwargs&quot;: {&quot;contrast&quot;: [0.8, 1.2]}},
+        &quot;saturation&quot;: {&quot;type&quot;: &quot;ColorJitter&quot;, &quot;weight&quot;: 1.0, &quot;kwargs&quot;: {&quot;saturation&quot;: [0.5, 1.5]}},
+        &quot;hue&quot;:        {&quot;type&quot;: &quot;ColorJitter&quot;, &quot;weight&quot;: 1.0, &quot;kwargs&quot;: {&quot;hue&quot;: [-0.05, 0.05]}},
+        &quot;sharpness&quot;:  {&quot;type&quot;: &quot;SharpnessJitter&quot;, &quot;weight&quot;: 1.0, &quot;kwargs&quot;: {&quot;sharpness&quot;: [0.5, 1.5]}},
+        &quot;affine&quot;:     {&quot;type&quot;: &quot;RandomAffine&quot;, &quot;weight&quot;: 1.0, &quot;kwargs&quot;: {&quot;degrees&quot;: [-5, 5], &quot;translate&quot;: [0.05, 0.05]}}
+    }
+}</code></pre>
+
+<h3 id="35-视频编码流程">3.5 视频编码流程</h3>
+
+<pre><code>记录时:
+  PNG 模式:   camera frame → PNG 文件 → (episode 结束后) → encode_video_frames() → mp4
+  Streaming:  camera frame → StreamingVideoEncoder (实时 PyAV) → mp4
+
+加载时:
+  mp4 → decode_video_frames(timestamps) → torch.Tensor (C, H, W)
+  支持的 video_backend: torchcodec (推荐), pyav, video_reader</code></pre>
+
+<h3 id="36-数据统计计算">3.6 数据统计计算</h3>
+
+<p><code>compute<em>episode</em>stats()</code> 计算每个 episode 的统计量，然后聚合为全局统计：</p>
+
+<pre><code>stats.json 内容:
+{
+    &quot;observation.state&quot;: {
+        &quot;min&quot;: float | array,   // 用于 MIN_MAX 归一化
+        &quot;max&quot;: float | array,
+        &quot;mean&quot;: float | array,  // 用于 MEAN_STD 归一化
+        &quot;std&quot;: float | array,
+        &quot;q01&quot;: float | array,   // 分位数 (可选, 用于 TDMPC)
+        &quot;q99&quot;: float | array
+    },
+    &quot;action&quot;: { ... },
+    &quot;observation.images.front&quot;: {
+        &quot;mean&quot;: [R, G, B],
+        &quot;std&quot;: [R, G, B]
+    },
+    ...
+}</code></pre>
+
+<hr>
+
+<h2 id="4-outputstrain-模型文件结构">4. outputs/train 模型文件结构</h2>
+
+<h3 id="41-四个已训练模型概览">4.1 四个已训练模型概览</h3>
+
+<p>项目中有 4 个已训练的 DP (Diffusion Policy) 模型变体：</p>
+
+<table>
+<thead><tr>
+<th style="text-align:left">模型</th>
+<th style="text-align:left">总训练步数</th>
+<th style="text-align:left">检查点</th>
+<th style="text-align:left">类型</th>
+</tr></thead>
+<tbody>
+<tr>
+<td style="text-align:left"><code>dp_tactile1</code></td>
+<td style="text-align:left">200,000</td>
+<td style="text-align:left">5 个 (40k, 80k, 120k, 160k, 200k)</td>
+<td style="text-align:left">Diffusion Policy + 触觉</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>dp_tactile2</code></td>
+<td style="text-align:left">100,000</td>
+<td style="text-align:left">6 个 (20k, 40k, 60k, 80k, 100k, last)</td>
+<td style="text-align:left">Diffusion Policy + 触觉</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>dp_tactile3</code></td>
+<td style="text-align:left">100,000</td>
+<td style="text-align:left">6 个 (20k, 40k, 60k, 80k, 100k, last)</td>
+<td style="text-align:left">Diffusion Policy + 触觉</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>dp_tactile4</code></td>
+<td style="text-align:left">80,000</td>
+<td style="text-align:left">5 个 (20k, 40k, 60k, 80k, last)</td>
+<td style="text-align:left">Diffusion Policy + 触觉</td>
+</tr>
+</tbody></table>
+
+<p>每个模型大小约为 1.1 GB (仅 <code>model.safetensors</code>)，总计约 70 GB。</p>
+
+<h3 id="42-单个检查点文件结构">4.2 单个检查点文件结构</h3>
+
+<pre><code>checkpoints/XXXXXX/  (例如: 040000)
+├── pretrained_model/                          # 可独立加载的模型
+│   ├── config.json                            # 策略配置 (DiffusionConfig)
+│   ├── model.safetensors                      # 模型权重 (~1.1 GB)
+│   ├── policy_preprocessor.json               # 预处理器管道配置
+│   ├── policy_preprocessor_step_3_normalizer_processor.safetensors  # 归一化统计量 (~9.6 KB)
+│   ├── policy_postprocessor.json              # 后处理器管道配置
+│   ├── policy_postprocessor_step_0_unnormalizer_processor.safetensors  # 反归一化统计量 (~9.6 KB)
+│   └── train_config.json                      # 完整训练配置
+│
+└── training_state/                            # 训练优化器/调度器状态 (用于 resume)
+    ├── optimizer_param_groups.json             # 优化器参数组配置
+    ├── optimizer_state.safetensors             # 优化器状态 (Adam moments)
+    ├── rng_state.safetensors                   # 随机数生成器状态
+    ├── scheduler_state.json                    # 学习率调度器状态
+    └── training_step.json                      # 当前训练步数</code></pre>
+
+<h3 id="43-各配置文件的数据类型和结构">4.3 各配置文件的数据类型和结构</h3>
+
+<h4 id="431-configjson-diffusionconfig">4.3.1 <code>config.json</code> (DiffusionConfig)</h4>
+
+<pre><code>{
+    &quot;type&quot;: &quot;diffusion&quot;,
+    &quot;n_obs_steps&quot;: 2,
+    &quot;input_features&quot;: {
+        &quot;observation.state&quot;:            {&quot;type&quot;: &quot;STATE&quot;,  &quot;shape&quot;: [6]},
+        &quot;observation.images.front&quot;:     {&quot;type&quot;: &quot;VISUAL&quot;, &quot;shape&quot;: [3, 480, 640]},
+        &quot;observation.images.side&quot;:      {&quot;type&quot;: &quot;VISUAL&quot;, &quot;shape&quot;: [3, 480, 640]},
+        &quot;observation.tactile.primary&quot;:  {&quot;type&quot;: &quot;STATE&quot;,  &quot;shape&quot;: [12, 32]}
+    },
+    &quot;output_features&quot;: {
+        &quot;action&quot;: {&quot;type&quot;: &quot;ACTION&quot;, &quot;shape&quot;: [6]}
+    },
+    &quot;horizon&quot;: 16,
+    &quot;n_action_steps&quot;: 8,
+    &quot;frame_stride&quot;: 3,
+    &quot;vision_backbone&quot;: &quot;resnet18&quot;,
+    &quot;resize_shape&quot;: [144, 192],
+    &quot;down_dims&quot;: [512, 1024, 2048],
+    &quot;kernel_size&quot;: 5,
+    &quot;n_groups&quot;: 8,
+    &quot;diffusion_step_embed_dim&quot;: 128,
+    &quot;noise_scheduler_type&quot;: &quot;DDPM&quot;,
+    &quot;num_train_timesteps&quot;: 100,
+    &quot;use_tactile&quot;: true,
+    &quot;tactile_encoder_type&quot;: &quot;cnn&quot;,
+    &quot;tactile_input_shape&quot;: [12, 32],
+    &quot;tactile_feature_dim&quot;: 64,
+    &quot;tactile_dropout&quot;: 0.3,
+    &quot;tactile_features&quot;: [&quot;observation.tactile.primary&quot;],
+    &quot;n_tactile_chunks&quot;: 1,
+    &quot;optimizer_lr&quot;: 0.0001,
+    &quot;scheduler_name&quot;: &quot;cosine&quot;
+}</code></pre>
+
+<p><strong>数据类型说明</strong>：</p>
+<ul>
+<li><code>input<em>features</code> / <code>output</em>features</code>：<code>dict[str, PolicyFeature]</code> — 定义了输入/输出的名称、类型 (FeatureType 枚举) 和形状</li>
+<li><code>FeatureType</code> 枚举值：<code>STATE</code>, <code>VISUAL</code>, <code>ACTION</code>, <code>ENV</code>, <code>TACTILE</code></li>
+<li>标量字段：<code>int</code> 或 <code>float</code></li>
+<li>形状字段：<code>tuple[int, ...]</code> — 如 <code>(144, 192)</code></li>
+<li>布尔字段：<code>true/false</code></li>
+</ul>
+
+<h4 id="432-train_configjson">4.3.2 <code>train_config.json</code></h4>
+
+<p>包含 3 个主要部分：</p>
+
+<pre><code>{
+    &quot;dataset&quot;: {
+        &quot;repo_id&quot;: &quot;None&quot;,
+        &quot;root&quot;: &quot;/data/home/scxk083/run/tactile1&quot;,
+        &quot;image_transforms&quot;: { ... },   // ColorJitter × 4, SharpnessJitter, RandomAffine
+        &quot;streaming&quot;: false
+    },
+    &quot;policy&quot;: {
+        // 与 config.json 内容相同 (策略配置)
+    },
+    &quot;training&quot;: {
+        &quot;output_dir&quot;: &quot;outputs/train/dp_tactile1&quot;,
+        &quot;batch_size&quot;: 16,
+        &quot;steps&quot;: 200000,
+        &quot;eval_freq&quot;: 20000,
+        &quot;log_freq&quot;: 200,
+        &quot;save_freq&quot;: 40000,
+        &quot;seed&quot;: 1000,
+        &quot;num_workers&quot;: 8,
+        &quot;optimizer&quot;: {
+            &quot;type&quot;: &quot;adam&quot;,
+            &quot;lr&quot;: 0.0001,
+            &quot;weight_decay&quot;: 1e-06,
+            &quot;grad_clip_norm&quot;: 10.0,
+            &quot;betas&quot;: [0.95, 0.999],
+            &quot;eps&quot;: 1e-08
+        },
+        &quot;scheduler&quot;: {
+            &quot;type&quot;: &quot;diffuser&quot;,
+            &quot;num_warmup_steps&quot;: 500,
+            &quot;name&quot;: &quot;cosine&quot;
+        },
+        &quot;eval&quot;: {
+            &quot;n_episodes&quot;: 50,
+            &quot;batch_size&quot;: 50,
+            &quot;use_async_envs&quot;: false
+        },
+        &quot;wandb&quot;: { &quot;enable&quot;: false }
+    }
+}</code></pre>
+
+<h4 id="433-modelsafetensors">4.3.3 <code>model.safetensors</code></h4>
+
+<p><strong>格式</strong>：SafeTensors (安全的张量序列化格式)</p>
+
+<p><strong>包含的权重张量</strong>：所有模型参数和缓冲区：</p>
+
+<table>
+<thead><tr>
+<th style="text-align:left">模块</th>
+<th style="text-align:left">包含的权重</th>
+<th style="text-align:left">数据形状示例</th>
+</tr></thead>
+<tbody>
+<tr>
+<td style="text-align:left"><code>rgb_encoder.backbone</code></td>
+<td style="text-align:left">ResNet18 卷积层权重</td>
+<td style="text-align:left"><code>[64, 3, 7, 7]</code> (conv1)</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>rgb_encoder.pool</code></td>
+<td style="text-align:left">SpatialSoftmax 参数</td>
+<td style="text-align:left"><code>[32, in_channels, 1, 1]</code></td>
+</tr>
+<tr>
+<td style="text-align:left"><code>rgb_encoder.out</code></td>
+<td style="text-align:left">全连接层权重</td>
+<td style="text-align:left"><code>[64, 64]</code></td>
+</tr>
+<tr>
+<td style="text-align:left"><code>tactile_encoder.backbone</code></td>
+<td style="text-align:left">CNN 卷积层 (TactileCNN)</td>
+<td style="text-align:left"><code>[32, 1, 3, 3]</code>, <code>[64, 32, 3, 3]</code>, <code>[128, 64, 3, 3]</code></td>
+</tr>
+<tr>
+<td style="text-align:left"><code>tactile_encoder.backbone.fc1/fc2</code></td>
+<td style="text-align:left">全连接层</td>
+<td style="text-align:left"><code>[conv_output, 512]</code>, <code>[512, 64]</code></td>
+</tr>
+<tr>
+<td style="text-align:left"><code>unet.*</code></td>
+<td style="text-align:left">Diffusion U-Net 1D</td>
+<td style="text-align:left"><code>[512, ...]</code>, <code>[2048, ...]</code> 等</td>
+</tr>
+</tbody></table>
+
+<p><strong>数据类型</strong>：<code>torch.float16</code> (混合精度 AMP 训练) 或 <code>torch.float32</code></p>
+
+<h4 id="434-预处理器后处理器-safetensors">4.3.4 预处理器/后处理器 safetensors</h4>
+
+<p><strong><code>policy<em>preprocessor</em>step<em>3</em>normalizer_processor.safetensors</code></strong>：</p>
+
+<p>包含归一化统计量（各模态的 mean, std, min, max）：</p>
+
+<pre><code>{
+    &quot;observation.state_mean&quot;: Tensor(shape=[6], dtype=float32),    # MIN_MAX 用 min/max
+    &quot;observation.state_std&quot;: Tensor(shape=[6], dtype=float32),
+    &quot;observation.state_min&quot;: Tensor(shape=[6], dtype=float32),
+    &quot;observation.state_max&quot;: Tensor(shape=[6], dtype=float32),
+    &quot;observation.images.front_mean&quot;: Tensor(shape=[3,1,1], dtype=float32),  # MEAN_STD
+    &quot;observation.images.front_std&quot;: Tensor(shape=[3,1,1], dtype=float32),
+    &quot;observation.images.side_mean&quot;: Tensor(shape=[3,1,1], dtype=float32),
+    &quot;observation.images.side_std&quot;: Tensor(shape=[3,1,1], dtype=float32),
+    &quot;observation.tactile.primary_mean&quot;: Tensor(shape=[12,32], dtype=float32), # MEAN_STD
+    &quot;observation.tactile.primary_std&quot;: Tensor(shape=[12,32], dtype=float32),
+    &quot;action_mean&quot;: Tensor(shape=[6], dtype=float32),
+    &quot;action_std&quot;: Tensor(shape=[6], dtype=float32),
+    &quot;action_min&quot;: Tensor(shape=[6], dtype=float32),
+    &quot;action_max&quot;: Tensor(shape=[6], dtype=float32),
+}</code></pre>
+
+<p><strong><code>policy<em>postprocessor</em>step<em>0</em>unnormalizer_processor.safetensors</code></strong>：</p>
+
+<p>仅包含动作的反归一化统计量：</p>
+
+<pre><code>{
+    &quot;action_mean&quot;: Tensor(shape=[6], dtype=float32),
+    &quot;action_std&quot;: Tensor(shape=[6], dtype=float32),
+    &quot;action_min&quot;: Tensor(shape=[6], dtype=float32),
+    &quot;action_max&quot;: Tensor(shape=[6], dtype=float32),
+}</code></pre>
+
+<h4 id="435-训练状态文件">4.3.5 训练状态文件</h4>
+
+<p><strong><code>optimizer_state.safetensors</code></strong>：</p>
+<ul>
+<li>包含 Adam 优化器每个参数组的 <code>exp<em>avg</code> (一阶矩) 和 <code>exp</em>avg_sq</code> (二阶矩)</li>
+<li>数据类型：<code>float32</code></li>
+</ul>
+
+<p><strong><code>rng_state.safetensors</code></strong>：</p>
+<ul>
+<li>包含 PyTorch, NumPy, Python 随机数生成器状态</li>
+<li>用于训练完全可恢复</li>
+</ul>
+
+<p><strong><code>training_step.json</code></strong>：</p>
+<pre><code>{&quot;step&quot;: 40000}</code></pre>
+
+<p><strong><code>optimizer<em>param</em>groups.json</code></strong>：</p>
+<ul>
+<li>包含每个参数组的优化器配置（lr, betas, eps, weight_decay）和参数索引列表</li>
+</ul>
+
+<p><strong><code>scheduler_state.json</code></strong>：</p>
+<ul>
+<li>Cosine 调度器状态：<code>base<em>lrs</code>, <code>last</em>epoch</code>, <code><em>step</em>count</code>, <code><em>last</em>lr</code></li>
+</ul>
+
+<h3 id="44-模型加载流程">4.4 模型加载流程</h3>
+
+<pre><code># 1. 加载配置
+config = PreTrainedConfig.from_pretrained(&quot;checkpoints/040000/pretrained_model&quot;)
+# → 读取 config.json → DiffusionConfig 实例
+
+# 2. 加载策略
+policy = DiffusionPolicy.from_pretrained(&quot;checkpoints/040000/pretrained_model&quot;)
+# → 读取 config.json + model.safetensors → DiffusionPolicy 实例
+
+# 3. 加载预处理器
+preprocessor = PolicyProcessorPipeline.from_pretrained(&quot;checkpoints/040000/pretrained_model&quot;)
+# → 读取 policy_preprocessor.json + normalizer .safetensors
+
+# 4. 推理
+policy.select_action(preprocessor(observation)) → 反归一化动作</code></pre>
+
+<h3 id="45-检查点保存机制">4.5 检查点保存机制</h3>
+
+<p>训练脚本 <code>lerobot<em>train.py</code> 中的 <code>save</em>checkpoint()</code>：</p>
+
+<pre><code>checkpoint_dir = get_step_checkpoint_dir(output_dir, total_steps, current_step)
+# 例如: outputs/train/dp_tactile1/checkpoints/040000/
+
+save_checkpoint(
+    checkpoint_dir=checkpoint_dir,
+    step=step,
+    cfg=cfg,                    # → train_config.json
+    policy=unwrapped_policy,    # → config.json + model.safetensors
+    optimizer=optimizer,        # → training_state/optimizer_*.safetensors
+    scheduler=lr_scheduler,     # → training_state/scheduler_state.json
+    preprocessor=preprocessor,  # → policy_preprocessor*.json + .safetensors
+    postprocessor=postprocessor,# → policy_postprocessor*.json + .safetensors
+)
+update_last_checkpoint(checkpoint_dir)  # → 创建/更新 checkpoints/last/ 符号链接</code></pre>
+
+<hr>
+
+<h2 id="附录关键文件索引">附录：关键文件索引</h2>
+
+<table>
+<thead><tr>
+<th style="text-align:left">功能</th>
+<th style="text-align:left">文件路径</th>
+</tr></thead>
+<tbody>
+<tr>
+<td style="text-align:left">数据集核心类</td>
+<td style="text-align:left"><code>src/lerobot/datasets/lerobot_dataset.py</code></td>
+</tr>
+<tr>
+<td style="text-align:left">数据集元数据</td>
+<td style="text-align:left"><code>src/lerobot/datasets/dataset_metadata.py</code></td>
+</tr>
+<tr>
+<td style="text-align:left">特征工具</td>
+<td style="text-align:left"><code>src/lerobot/datasets/feature_utils.py</code></td>
+</tr>
+<tr>
+<td style="text-align:left">数据集采样器</td>
+<td style="text-align:left"><code>src/lerobot/datasets/sampler.py</code></td>
+</tr>
+<tr>
+<td style="text-align:left">图像写入器</td>
+<td style="text-align:left"><code>src/lerobot/datasets/image_writer.py</code></td>
+</tr>
+<tr>
+<td style="text-align:left">视频编码/解码</td>
+<td style="text-align:left"><code>src/lerobot/datasets/video_utils.py</code></td>
+</tr>
+<tr>
+<td style="text-align:left">统计计算</td>
+<td style="text-align:left"><code>src/lerobot/datasets/compute_stats.py</code></td>
+</tr>
+<tr>
+<td style="text-align:left">策略配置基类</td>
+<td style="text-align:left"><code>src/lerobot/configs/policies.py</code></td>
+</tr>
+<tr>
+<td style="text-align:left">训练配置</td>
+<td style="text-align:left"><code>src/lerobot/configs/train.py</code></td>
+</tr>
+<tr>
+<td style="text-align:left">策略基类</td>
+<td style="text-align:left"><code>src/lerobot/policies/pretrained.py</code></td>
+</tr>
+<tr>
+<td style="text-align:left">归一化处理器</td>
+<td style="text-align:left"><code>src/lerobot/processor/normalize_processor.py</code></td>
+</tr>
+<tr>
+<td style="text-align:left">处理器管道</td>
+<td style="text-align:left"><code>src/lerobot/processor/pipeline.py</code></td>
+</tr>
+<tr>
+<td style="text-align:left">机器人基类</td>
+<td style="text-align:left"><code>src/lerobot/robots/robot.py</code></td>
+</tr>
+<tr>
+<td style="text-align:left">标定脚本</td>
+<td style="text-align:left"><code>src/lerobot/scripts/lerobot_calibrate.py</code></td>
+</tr>
+<tr>
+<td style="text-align:left">遥操作脚本</td>
+<td style="text-align:left"><code>src/lerobot/scripts/lerobot_teleoperate.py</code></td>
+</tr>
+<tr>
+<td style="text-align:left">记录脚本</td>
+<td style="text-align:left"><code>src/lerobot/scripts/lerobot_record.py</code></td>
+</tr>
+<tr>
+<td style="text-align:left">训练脚本</td>
+<td style="text-align:left"><code>src/lerobot/scripts/lerobot_train.py</code></td>
+</tr>
+<tr>
+<td style="text-align:left">评估脚本</td>
+<td style="text-align:left"><code>src/lerobot/scripts/lerobot_eval.py</code></td>
+</tr>
+<tr>
+<td style="text-align:left">触觉编码器</td>
+<td style="text-align:left"><code>src/lerobot/policies/tactile/encoder.py</code></td>
+</tr>
+</tbody></table>
+
+</body>
+</html>

@@ -1,0 +1,793 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>LeRobot 评估（Evaluate）详解</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    line-height: 1.7; color: #24292e; background: #fff;
+    max-width: 800px; margin: 0 auto; padding: 16px;
+    font-size: 16px;
+}
+h1 { font-size: 1.8em; border-bottom: 2px solid #e1e4e8; padding-bottom: 0.3em; margin: 24px 0 16px; }
+h2 { font-size: 1.45em; border-bottom: 1px solid #e1e4e8; padding-bottom: 0.3em; margin: 24px 0 16px; }
+h3 { font-size: 1.25em; margin: 24px 0 16px; }
+h4 { font-size: 1.1em; margin: 24px 0 16px; }
+p { margin: 0 0 16px; }
+a { color: #0366d6; text-decoration: none; }
+a:hover { text-decoration: underline; }
+code {
+    background: #f6f8fa; padding: 2px 6px; border-radius: 4px;
+    font-family: 'SF Mono', 'Fira Code', monospace; font-size: 0.9em;
+}
+pre {
+    background: #f6f8fa; padding: 16px; border-radius: 6px;
+    overflow-x: auto; margin: 0 0 16px; line-height: 1.45;
+}
+pre code { background: none; padding: 0; }
+blockquote {
+    border-left: 4px solid #dfe2e5; padding: 0 16px; color: #6a737d; margin: 0 0 16px;
+}
+table { border-collapse: collapse; width: 100%; margin: 0 0 16px; }
+th, td { border: 1px solid #dfe2e5; padding: 8px 12px; text-align: left; }
+th { background: #f6f8fa; font-weight: 600; }
+tr:nth-child(even) { background: #f6f8fa; }
+ul, ol { padding-left: 2em; margin: 0 0 16px; }
+li { margin: 4px 0; }
+img { max-width: 100%; }
+hr { border: none; border-top: 1px solid #e1e4e8; margin: 24px 0; }
+strong { font-weight: 600; }
+.index-list { list-style: none; padding: 0; }
+.index-list li { margin: 12px 0; padding: 12px 16px; background: #f6f8fa; border-radius: 8px; }
+.index-list a { font-size: 1.1em; font-weight: 500; }
+.back-link { display: inline-block; margin-bottom: 16px; color: #586069; font-size: 0.9em; }
+</style>
+</head>
+<body>
+<a class="back-link" href="index.html">← 返回索引</a>
+<h1 id="lerobot-评估evaluate详解">LeRobot 评估（Evaluate）详解</h1>
+
+<blockquote>基于 <code>src/lerobot/scripts/lerobot_eval.py</code>（815行）及相关模块，全面解析策略评估的架构设计与实现原理。</blockquote>
+
+<hr>
+
+<h2 id="目录">目录</h2>
+
+<ol>
+<li><a href="#1-概述">概述</a></li>
+<li><a href="#2-配置体系">配置体系</a></li>
+<li><a href="#3-eval<em>main-主流程">eval</em>main() 主流程</a></li>
+<li><a href="#4-rollout-单次推演">rollout() 单次推演</a></li>
+<li><a href="#5-eval<em>policy-批量评估">eval</em>policy() 批量评估</a></li>
+<li><a href="#6-eval<em>policy</em>all-多环境聚合评估">eval<em>policy</em>all() 多环境聚合评估</a></li>
+<li><a href="#7-仿真环境评估-vs-真实机器人评估">仿真环境评估 vs 真实机器人评估</a></li>
+<li><a href="#8-视频录制机制">视频录制机制</a></li>
+<li><a href="#9-完整数据流总结">完整数据流总结</a></li>
+</ol>
+
+<hr>
+
+<h2 id="1-概述">1. 概述</h2>
+
+<p><code>lerobot_eval</code> 在仿真环境（或真实机器人）中运行预训练策略，执行多个 episode 的 rollout，收集奖励、成功率等指标，并可选地录制评估视频。</p>
+
+<p><strong>两种使用场景</strong>：</p>
+<ol>
+<li><strong>训练中评估</strong>：<code>lerobot<em>train.py</code> 在仿真环境中定期调用 <code>eval</em>policy_all()</code> 评估检查点</li>
+<li><strong>独立评估</strong>：通过 CLI 或脚本直接运行 <code>lerobot-eval</code> 评估已训练的模型</li>
+</ol>
+
+<hr>
+
+<h2 id="2-配置体系">2. 配置体系</h2>
+
+<h3 id="21-评估配置-evalpipelineconfig">2.1 评估配置 <code>EvalPipelineConfig</code></h3>
+
+<p><strong>文件</strong>: <code>src/lerobot/configs/eval.py</code></p>
+
+<pre><code>@dataclass
+class EvalPipelineConfig:
+    env: EnvConfig                          # 环境配置
+    eval: EvalConfig                        # 评估参数
+    policy: PreTrainedConfig                # 策略配置 (含 pretrained_path)
+    output_dir: Path | None = None          # 输出目录
+    seed: int | None = None                 # 随机种子
+    rename_map: dict[str, str] = {}        # 观察键重命名
+    trust_remote_code: bool = False         # 是否信任远程代码 (Hub 环境)
+
+@dataclass
+class EvalConfig:
+    n_episodes: int = 50                    # 评估 episode 数
+    batch_size: int = 50                    # 并行环境数
+    use_async_envs: bool = False            # 是否使用异步环境
+    max_episodes_rendered: int = 10         # 渲染视频的最大 episode 数</code></pre>
+
+<h3 id="22-使用示例">2.2 使用示例</h3>
+
+<pre><code># 从 Hub 评估模型
+lerobot-eval \
+    --policy.path=lerobot/diffusion_pusht \
+    --env.type=pusht \
+    --eval.batch_size=10 \
+    --eval.n_episodes=10 \
+    --policy.use_amp=false \
+    --policy.device=cuda
+
+# 从本地检查点评估
+lerobot-eval \
+    --policy.path=outputs/train/diffusion_pusht/checkpoints/005000/pretrained_model \
+    --env.type=pusht \
+    --eval.batch_size=10 \
+    --eval.n_episodes=10 \
+    --policy.use_amp=false \
+    --policy.device=cuda</code></pre>
+
+<hr>
+
+<h2 id="3-eval_main-主流程">3. eval_main() 主流程</h2>
+
+<p><strong>文件</strong>: <code>src/lerobot/scripts/lerobot_eval.py:506-580</code></p>
+
+<pre><code>@parser.wrap()
+def eval_main(cfg: EvalPipelineConfig):
+    # === 1. 初始化 ===
+    device = get_safe_torch_device(cfg.policy.device)
+    torch.backends.cudnn.benchmark = True
+    set_seed(cfg.seed)
+
+    # === 2. 创建环境 ===
+    envs = make_env(
+        cfg.env,
+        n_envs=cfg.eval.batch_size,   # 并行环境数
+        use_async_envs=cfg.eval.use_async_envs,
+    )
+    # envs: dict[suite_name, dict[task_id, VectorEnv]]
+
+    # === 3. 创建策略 ===
+    policy = make_policy(
+        cfg=cfg.policy,
+        env_cfg=cfg.env,
+        rename_map=cfg.rename_map,
+    )
+    policy.eval()  # 评估模式 (关闭 dropout, 使用 running stats)
+
+    # === 4. 创建处理器 ===
+    preprocessor, postprocessor = make_pre_post_processors(
+        policy_cfg=cfg.policy,
+        pretrained_path=cfg.policy.pretrained_path,
+        preprocessor_overrides={
+            &quot;device_processor&quot;: {&quot;device&quot;: str(policy.config.device)},
+            &quot;rename_observations_processor&quot;: {&quot;rename_map&quot;: cfg.rename_map},
+        },
+    )
+
+    # 特定于环境的处理器 (如 LIBERO)
+    env_preprocessor, env_postprocessor = make_env_pre_post_processors(
+        env_cfg=cfg.env, policy_cfg=cfg.policy
+    )
+
+    # === 5. 运行评估 ===
+    with torch.no_grad(), torch.autocast(device.type) if cfg.policy.use_amp else nullcontext():
+        info = eval_policy_all(
+            envs=envs,
+            policy=policy,
+            env_preprocessor=env_preprocessor,
+            env_postprocessor=env_postprocessor,
+            preprocessor=preprocessor,
+            postprocessor=postprocessor,
+            n_episodes=cfg.eval.n_episodes,
+            max_episodes_rendered=10,
+            videos_dir=Path(cfg.output_dir) / &quot;videos&quot;,
+            start_seed=cfg.seed,
+            max_parallel_tasks=cfg.env.max_parallel_tasks,
+        )
+
+    # === 6. 输出结果 ===
+    print(&quot;Overall Aggregated Metrics:&quot;)
+    print(info[&quot;overall&quot;])   # {avg_sum_reward, pc_success, eval_s, ...}
+
+    # === 7. 保存评估信息 ===
+    close_envs(envs)
+    with open(cfg.output_dir / &quot;eval_info.json&quot;, &quot;w&quot;) as f:
+        json.dump(info, f, indent=2)</code></pre>
+
+<hr>
+
+<h2 id="4-rollout-单次推演">4. rollout() 单次推演</h2>
+
+<p><strong>文件</strong>: <code>src/lerobot/scripts/lerobot_eval.py:96-248</code></p>
+
+<h3 id="41-签名与返回">4.1 签名与返回</h3>
+
+<pre><code>def rollout(
+    env: gym.vector.VectorEnv,       # 并行环境 (batch_size 个)
+    policy: PreTrainedPolicy,
+    env_preprocessor,                # 环境特定预处理
+    env_postprocessor,               # 环境特定后处理
+    preprocessor,                    # 策略预处理
+    postprocessor,                   # 策略后处理
+    seeds: list[int] | None = None,
+    return_observations: bool = False,
+    render_callback: Callable | None = None,
+) -&gt; dict:
+    &quot;&quot;&quot;
+    Returns:
+        &quot;action&quot;:   (batch, sequence, action_dim)  动作序列
+        &quot;reward&quot;:   (batch, sequence)              奖励序列
+        &quot;success&quot;:  (batch, sequence)              成功标志
+        &quot;done&quot;:     (batch, sequence)              终止标志 (累计的)
+        &quot;observation&quot;: (可选) (batch, sequence+1, *) 观察序列
+    &quot;&quot;&quot;</code></pre>
+
+<h3 id="42-推演循环">4.2 推演循环</h3>
+
+<pre><code>def rollout(env, policy, ...):
+    # === 重置环境 ===
+    policy.reset()                    # 清空策略的观察/动作缓存
+    observation, info = env.reset(seed=seeds)
+
+    all_actions = []
+    all_rewards = []
+    all_successes = []
+    all_dones = []
+
+    step = 0
+    done = np.array([False] * env.num_envs)
+    max_steps = env.call(&quot;_max_episode_steps&quot;)[0]
+
+    while not np.all(done) and step &lt; max_steps:
+        # === (a) 观察预处理 ===
+        observation = preprocess_observation(observation)
+        # raw numpy → 转换为 LeRobot 格式 (channel-first tensors)
+
+        # === (b) 添加任务信息 ===
+        observation = add_envs_task(env, observation)
+
+        # === (c) 环境特定预处理 ===
+        observation = env_preprocessor(observation)
+
+        # === (d) 策略预处理 + 推理 ===
+        observation = preprocessor(observation)
+        # RenameObs → ToBatch → Device → Normalize
+
+        with torch.inference_mode():
+            action = policy.select_action(observation)
+
+        # === (e) 策略后处理 ===
+        action = postprocessor(action)  # Unnormalize → CPU
+
+        # === (f) 环境后处理 + 转 numpy ===
+        action_transition = {ACTION: action}
+        action_transition = env_postprocessor(action_transition)
+        action_numpy = action_transition[ACTION].to(&quot;cpu&quot;).numpy()
+
+        # === (g) 执行动作 ===
+        observation, reward, terminated, truncated, info = env.step(action_numpy)
+
+        # === (h) 处理成功标志 ===
+        if &quot;final_info&quot; in info:
+            successes = info[&quot;final_info&quot;][&quot;is_success&quot;].tolist()
+        else:
+            successes = [False] * env.num_envs
+
+        # === (i) 累积 done 状态 ===
+        done = terminated | truncated | done
+        if step + 1 == max_steps:
+            done = np.ones_like(done, dtype=bool)
+
+        # === (j) 记录 ===
+        all_actions.append(torch.from_numpy(action_numpy))
+        all_rewards.append(torch.from_numpy(reward))
+        all_dones.append(torch.from_numpy(done))
+        all_successes.append(torch.tensor(successes))
+
+        step += 1
+
+    # === 堆叠所有时间步 ===
+    return {
+        ACTION: torch.stack(all_actions, dim=1),    # (B, T, action_dim)
+        &quot;reward&quot;: torch.stack(all_rewards, dim=1),   # (B, T)
+        &quot;success&quot;: torch.stack(all_successes, dim=1),# (B, T)
+        &quot;done&quot;: torch.stack(all_dones, dim=1),        # (B, T)
+    }</code></pre>
+
+<h3 id="43-关键细节">4.3 关键细节</h3>
+
+<p><strong>preprocess_observation()</strong> (<code>src/lerobot/envs/utils.py</code>):</p>
+
+<pre><code>def preprocess_observation(observation):
+    &quot;&quot;&quot;将 gym 的原始 numpy 观察转换为 LeRobot 格式&quot;&quot;&quot;
+    processed = {}
+    for key, value in observation.items():
+        if &quot;image&quot; in key:
+            # 图像: (B, H, W, C) → (B, C, H, W) 且 numpy → torch
+            processed[key] = torch.from_numpy(value).permute(0, 3, 1, 2).float() / 255.0
+        elif &quot;state&quot; in key:
+            processed[key] = torch.from_numpy(value).float()
+    return processed</code></pre>
+
+<p><strong>add<em>envs</em>task()</strong>: 从环境的 <code>task</code> 属性中读取任务描述，添加到观察字典中。</p>
+
+<p><strong>done 累积逻辑</strong>: 一旦某个环境 done，它保持 done 直到 rollout 结束。这使得后续可以用 mask 过滤掉 done 后的无效数据。</p>
+
+<hr>
+
+<h2 id="5-eval_policy-批量评估">5. eval_policy() 批量评估</h2>
+
+<p><strong>文件</strong>: <code>src/lerobot/scripts/lerobot_eval.py:251-458</code></p>
+
+<h3 id="51-功能">5.1 功能</h3>
+
+<p>运行多批次 rollout 以覆盖 <code>n_episodes</code> 个完整 episode：</p>
+
+<pre><code>def eval_policy(env, policy, ..., n_episodes, max_episodes_rendered, videos_dir, ...):
+    &quot;&quot;&quot;
+    运行多次 rollout 直到收集到 n_episodes 个 episode 的数据
+    &quot;&quot;&quot;
+    # 计算需要的 rollout 批次
+    n_batches = ceil(n_episodes / env.num_envs)
+
+    sum_rewards = []
+    all_successes = []
+
+    for batch_ix in range(n_batches):
+        # 运行一次 rollout
+        rollout_data = rollout(env, policy, ...)
+
+        # 找出每个环境第一个 done 的位置
+        done_indices = torch.argmax(rollout_data[&quot;done&quot;].to(int), dim=1)
+
+        # 创建 mask 过滤 done 后的数据
+        mask = (torch.arange(n_steps) &lt;= repeat(done_indices + 1, &quot;b -&gt; b s&quot;, s=n_steps)).int()
+
+        # 聚合每个 episode 的 total reward
+        batch_sum_rewards = reduce((rollout_data[&quot;reward&quot;] * mask), &quot;b n -&gt; b&quot;, &quot;sum&quot;)
+        sum_rewards.extend(batch_sum_rewards.tolist())
+
+        # 聚合每个 episode 的成功状态
+        batch_successes = reduce((rollout_data[&quot;success&quot;] * mask), &quot;b n -&gt; b&quot;, &quot;any&quot;)
+        all_successes.extend(batch_successes.tolist())
+
+        # 可选: 渲染视频
+        if max_episodes_rendered &gt; 0:
+            # 异步保存视频 (Thread)
+            thread = threading.Thread(target=write_video, args=(video_path, frames, fps))
+            thread.start()
+
+    # 聚合最终评估信息
+    return {
+        &quot;per_episode&quot;: [
+            {&quot;episode_ix&quot;: i, &quot;sum_reward&quot;: r, &quot;success&quot;: s, ...}
+            for i, (r, s) in enumerate(zip(sum_rewards, all_successes))
+        ],
+        &quot;aggregated&quot;: {
+            &quot;avg_sum_reward&quot;: float(np.nanmean(sum_rewards)),
+            &quot;pc_success&quot;: float(np.nanmean(all_successes) * 100),
+            &quot;eval_s&quot;: total_time,
+            &quot;eval_ep_s&quot;: total_time / n_episodes,
+        },
+    }</code></pre>
+
+<hr>
+
+<h2 id="6-eval_policy_all-多环境聚合评估">6. eval<em>policy</em>all() 多环境聚合评估</h2>
+
+<p><strong>文件</strong>: <code>src/lerobot/scripts/lerobot_eval.py:681-804</code></p>
+
+<h3 id="61-功能">6.1 功能</h3>
+
+<p>当存在多个评估环境（如不同的 task suite 或 task id）时，逐个评估并聚合结果。</p>
+
+<pre><code>def eval_policy_all(
+    envs: dict[str, dict[int, gym.vector.VectorEnv]],  # {suite: {task_id: vec_env}}
+    policy, ...
+    n_episodes: int,
+    max_parallel_tasks: int = 1,  # 线程池并行数
+) -&gt; dict:
+    &quot;&quot;&quot;
+    返回:
+    {
+        &quot;per_task&quot;: [{task_group, task_id, metrics}, ...],
+        &quot;per_group&quot;: {suite_name: {avg_sum_reward, pc_success, ...}},
+        &quot;overall&quot;: {avg_sum_reward, pc_success, eval_s, ...},
+    }
+    &quot;&quot;&quot;
+    # 展平任务
+    tasks = [(tg, tid, vec) for tg, group in envs.items() for tid, vec in group.items()]
+
+    if max_parallel_tasks &lt;= 1:
+        # 顺序评估
+        for task_group, task_id, env in tasks:
+            metrics = eval_one(env, policy, ...)
+            _accumulate(task_group, metrics)
+    else:
+        # 并行评估 (ThreadPoolExecutor)
+        with ThreadPoolExecutor(max_workers=max_parallel_tasks) as executor:
+            futures = {executor.submit(run_one, tg, tid, env, ...): (tg, tid)
+                       for tg, tid, env in tasks}
+            for fut in as_completed(futures):
+                tg, tid, metrics = fut.result()
+                _accumulate(tg, metrics)
+
+    # 聚合指标
+    return {
+        &quot;per_task&quot;: [...],
+        &quot;per_group&quot;: {suite: {avg_sum_reward, pc_success, ...}},
+        &quot;overall&quot;: {avg_sum_reward, pc_success, eval_s, ...},
+    }</code></pre>
+
+<h3 id="62-聚合指标计算">6.2 聚合指标计算</h3>
+
+<pre><code>def _agg_from_list(xs):
+    arr = np.array(xs, dtype=float)
+    return float(np.nanmean(arr))
+
+overall = {
+    &quot;avg_sum_reward&quot;: _agg_from_list(all_sum_rewards),
+    &quot;pc_success&quot;: _agg_from_list(all_successes) * 100,  # 百分比
+    &quot;eval_s&quot;: total_seconds,
+    &quot;eval_ep_s&quot;: total_seconds / n_episodes,
+}</code></pre>
+
+<hr>
+
+<h2 id="7-仿真环境评估-vs-真实机器人评估">7. 仿真环境评估 vs 真实机器人评估</h2>
+
+<p>LeRobot 中评估分为两条完全不同的路径，由运行环境决定：<strong>仿真用 <code>lerobot-eval</code>，真实机器人用 <code>lerobot-record</code></strong>。</p>
+
+<h3 id="71-核心区别">7.1 核心区别</h3>
+
+<table>
+<thead><tr>
+<th style="text-align:left"></th>
+<th style="text-align:left"><code>lerobot-eval</code></th>
+<th style="text-align:left"><code>lerobot-record</code> (策略模式)</th>
+</tr></thead>
+<tbody>
+<tr>
+<td style="text-align:left"><strong>运行环境</strong></td>
+<td style="text-align:left">仿真 (gym)</td>
+<td style="text-align:left">真实机器人</td>
+</tr>
+<tr>
+<td style="text-align:left"><strong>环境接口</strong></td>
+<td style="text-align:left"><code>gym.vector.VectorEnv</code></td>
+<td style="text-align:left"><code>Robot</code> (串口/相机/触觉硬件)</td>
+</tr>
+<tr>
+<td style="text-align:left"><strong>环境创建</strong></td>
+<td style="text-align:left"><code>make_env(cfg.env)</code> → 自动构建仿真场景</td>
+<td style="text-align:left"><code>make<em>robot</em>from_config(cfg.robot)</code> → 连接物理设备</td>
+</tr>
+<tr>
+<td style="text-align:left"><strong>动作执行</strong></td>
+<td style="text-align:left"><code>env.step(action_numpy)</code> → gym 仿真步进</td>
+<td style="text-align:left"><code>robot.send_action(action)</code> → 电机总线指令</td>
+</tr>
+<tr>
+<td style="text-align:left"><strong>观察获取</strong></td>
+<td style="text-align:left"><code>env.reset()</code> / <code>env.step()</code> 返回观察</td>
+<td style="text-align:left"><code>robot.get_observation()</code> → 读电机编码器+相机帧</td>
+</tr>
+<tr>
+<td style="text-align:left"><strong>奖励/成功信号</strong></td>
+<td style="text-align:left">环境自动返回 <code>reward</code>, <code>is_success</code></td>
+<td style="text-align:left">无（真实世界无自动 reward）</td>
+</tr>
+<tr>
+<td style="text-align:left"><strong>并行评估</strong></td>
+<td style="text-align:left">支持 (<code>gym.vector.VectorEnv</code> 批量并行)</td>
+<td style="text-align:left">不支持（真实机器人只能串行）</td>
+</tr>
+<tr>
+<td style="text-align:left"><strong>评估指标</strong></td>
+<td style="text-align:left"><code>avg<em>sum</em>reward</code>, <code>pc_success</code>, 自动统计</td>
+<td style="text-align:left">无自动指标（需人工观察或后处理）</td>
+</tr>
+<tr>
+<td style="text-align:left"><strong>评估视频</strong></td>
+<td style="text-align:left"><code>env.render()</code> → 仿真渲染画面</td>
+<td style="text-align:left">真实相机图像 → <code>log<em>rerun</em>data()</code></td>
+</tr>
+<tr>
+<td style="text-align:left"><strong>结果产物</strong></td>
+<td style="text-align:left"><code>eval_info.json</code> + <code>.mp4</code> 视频</td>
+<td style="text-align:left">LeRobot 数据集（parquet + mp4）</td>
+</tr>
+<tr>
+<td style="text-align:left"><strong>数据集命名约定</strong></td>
+<td style="text-align:left">不适用</td>
+<td style="text-align:left">必须 <code>eval<em></code> 前缀（<code>sanity</em>check<em>dataset</em>name</code> 校验）</td>
+</tr>
+</tbody></table>
+
+<h3 id="72-为什么真实机器人不能用-lerobot-eval">7.2 为什么真实机器人不能用 <code>lerobot-eval</code></h3>
+
+<p><code>lerobot_eval.py</code> 的核心函数 <code>rollout()</code> 硬依赖于 gym 接口：</p>
+
+<pre><code># lerobot_eval.py — rollout() 中硬编码的 gym 调用
+observation, info = env.reset(seed=seeds)              # gym API
+observation, reward, terminated, truncated, info = env.step(action_numpy)  # gym API
+done = terminated | truncated | done</code></pre>
+
+<p>这些无法替换为真实硬件调用，因为：</p>
+<ul>
+<li><strong>没有 <code>Robot</code> 抽象</strong>：<code>lerobot-eval</code> 不知道 <code>robot.get<em>observation()</code> 或 <code>robot.send</em>action()</code> 的存在</li>
+<li><strong>没有相机管理</strong>：不知道如何连接 OpenCV/RealSense 相机</li>
+<li><strong>没有触觉传感器</strong>：没有 <code>TactileSensor</code> 的读取路径</li>
+<li><strong>没有 <code>reward</code> 信号</strong>：真实世界需要人工裁定成功/失败，不是 gym 的 <code>is_success</code> 字段</li>
+</ul>
+
+<h3 id="73-lerobot-record-如何实现策略驱动">7.3 <code>lerobot-record</code> 如何实现策略驱动</h3>
+
+<p><code>lerobot<em>record.py</code> 的动作来源在 <code>record</em>loop()</code> 中有明确的分支逻辑：</p>
+
+<pre><code># lerobot_record.py — record_loop() 中的动作来源分支
+
+# 分支 1: 纯策略驱动（无遥操作设备）
+if policy is not None and preprocessor is not None and postprocessor is not None:
+    action_values = predict_action(
+        observation=observation_frame,          # ← robot.get_observation() 的结果
+        policy=policy,
+        device=get_safe_torch_device(policy.config.device),
+        preprocessor=preprocessor,              # Rename → ToBatch → Device → Normalize
+        postprocessor=postprocessor,            # Unnormalize → CPU
+        use_amp=policy.config.use_amp,
+        task=single_task,
+        robot_type=robot.robot_type,
+    )
+    act_processed_policy = make_robot_action(action_values, dataset.features)
+
+# 分支 2: 纯遥操作驱动
+elif policy is None and isinstance(teleop, Teleoperator):
+    act = teleop.get_action()
+    act_processed_teleop = teleop_action_processor((act, obs))
+
+# 分支 3: 两者都没有 → 跳过（episode 间重置阶段）
+else:
+    no_action_count += 1
+    continue</code></pre>
+
+<p>关键点：当 <code>--policy.path</code> 指定且 <code>--teleop</code> 不指定时，<code>record_loop()</code> 进入分支 1，机器人完全由策略自主控制。真实评估的数据流为：</p>
+
+<pre><code>[真实硬件层]                          [lerobot-record 流程]
+
+相机 (opencv:0,1)  ──→ robot.get_observation()
+电机编码器 (ttyACM0)     读取关节角度+图像+触觉
+                                    │
+                                    ▼
+                         build_dataset_frame() → observation_frame
+                         {
+                           &quot;observation.state&quot;: [6] float32,
+                           &quot;observation.images.handeye&quot;: (360,640,3) uint8,
+                           &quot;observation.images.fixed&quot;: (360,640,3) uint8,
+                         }
+                                    │
+                                    ▼
+                         predict_action()
+                           ├── preprocessor(observation_frame)
+                           │     RenameObs → ToBatch → Device → Normalize
+                           ├── policy.select_action(obs)
+                           │     模型推理: (B, action_dim) tensor
+                           └── postprocessor(action)
+                                 Unnormalize → CPU → numpy
+                                    │
+                                    ▼
+电机 (ttyACM0)  ←── robot.send_action(action) ←── make_robot_action()
+                                    │
+                                    ▼
+                         dataset.add_frame(frame)
+                         记录到 {HF_USER}/eval_so101 数据集</code></pre>
+
+<h3 id="74-两种场景的使用方式">7.4 两种场景的使用方式</h3>
+
+<h4 id="场景-a仿真评估-lerobot-eval">场景 A：仿真评估 (<code>lerobot-eval</code>)</h4>
+
+<pre><code># 训练中自动评估（train.py 内部调用）
+# 或独立评估：
+lerobot-eval \
+    --policy.path=lerobot/diffusion_pusht \      # Hub 模型 或本地 checkpoint
+    --env.type=pusht \                            # 仿真环境类型
+    --eval.batch_size=10 \                        # 并行 10 个环境
+    --eval.n_episodes=50 \                        # 总计 50 个 episode
+    --policy.device=cuda
+# 产物: eval_info.json + videos/*.mp4</code></pre>
+
+<h4 id="场景-b真实机器人评估-lerobot-record">场景 B：真实机器人评估 (<code>lerobot-record</code>)</h4>
+
+<pre><code># 纯策略驱动（无遥操作，完全自主）
+lerobot-record \
+    --robot.type=so101_follower \
+    --robot.port=/dev/ttyACM0 \
+    --robot.cameras=&quot;{&#x27;handeye&#x27;: {...}, &#x27;fixed&#x27;: {...}}&quot; \
+    --policy.path=outputs/train/act_so101_test/checkpoints/last/pretrained_model \
+    --policy.device=cuda \
+    --dataset.repo_id=${HF_USER}/eval_so101 \     # eval_ 前缀
+    --dataset.single_task=&quot;Pick the cube&quot; \
+    --dataset.num_episodes=10 \
+    --dataset.push_to_hub=false                   # 仅本地评估
+
+# 可选：同时配 teleop 用于安全干预/episode 间重置
+# --teleop.type=so101_leader --teleop.port=/dev/ttyACM1</code></pre>
+
+<p><strong>同时配 teleop 和 policy 的场景</strong>：</p>
+<ul>
+<li>策略是<strong>主要</strong>动作源（机器人由模型自主控制）</li>
+<li>遥操作在 episode 间的重置阶段可用（<code>record_loop()</code> 中 <code>dataset=None</code> 的重置循环）</li>
+<li>提供人工安全干预能力</li>
+</ul>
+
+<h3 id="75-训练中的评估调用">7.5 训练中的评估调用</h3>
+
+<p>在 <code>lerobot_train.py</code> 中，训练过程的评估<strong>仅支持仿真</strong>：</p>
+
+<pre><code># lerobot_train.py
+if cfg.env and step % cfg.eval_freq == 0:
+    if is_main_process:
+        with torch.no_grad(), accelerator.autocast():
+            eval_info = eval_policy_all(
+                envs=eval_env,                    # gym.vector.VectorEnv
+                policy=unwrapped_policy,
+                n_episodes=cfg.eval.n_episodes,
+                videos_dir=output_dir / &quot;eval&quot; / f&quot;videos_step_{step_id}&quot;,
+                max_episodes_rendered=4,
+                start_seed=cfg.seed,
+            )
+        aggregated = eval_info[&quot;overall&quot;]
+        # → {&quot;avg_sum_reward&quot;: ..., &quot;pc_success&quot;: ...}</code></pre>
+
+<p>在真实机器人数据上训练时，<code>cfg.env</code> 通常为 <code>None</code>，因此训练循环中不会触发评估。真实机器人的评估需要在训练完成后，通过 <code>lerobot-record</code> 手动进行。</p>
+
+<hr>
+
+<h2 id="8-视频录制机制">8. 视频录制机制</h2>
+
+<h3 id="81-仿真环境视频">8.1 仿真环境视频</h3>
+
+<pre><code>def render_frame(env):
+    &quot;&quot;&quot;回调函数: 每步渲染环境画面&quot;&quot;&quot;
+    n_to_render = min(max_episodes_rendered - n_rendered, env.num_envs)
+    if isinstance(env, gym.vector.SyncVectorEnv):
+        ep_frames.append(np.stack([env.envs[i].render() for i in range(n_to_render)]))
+    # AsyncVectorEnv: env.call(&quot;render&quot;)
+
+# 渲染后异步保存
+thread = threading.Thread(
+    target=write_video,
+    args=(video_path, stacked_frames[:done_index + 1], fps),
+)
+thread.start()</code></pre>
+
+<h3 id="82-视频输出">8.2 视频输出</h3>
+
+<pre><code>outputs/train/&lt;job_name&gt;/eval/
+└── videos_step_020000/
+    ├── eval_episode_0.mp4
+    ├── eval_episode_1.mp4
+    ├── eval_episode_2.mp4
+    └── eval_episode_3.mp4</code></pre>
+
+<hr>
+
+<h2 id="9-完整数据流总结">9. 完整数据流总结</h2>
+
+<pre><code>                    ┌──────────────────────┐
+                    │  EvalPipelineConfig   │
+                    │  (env, policy, eval)  │
+                    └──────────┬───────────┘
+                               │
+              ┌────────────────┼────────────────┐
+              ▼                ▼                ▼
+        make_env()       make_policy()    make_processors()
+              │                │                │
+              ▼                ▼                ▼
+        VectorEnv       PreTrainedPolicy   preprocessor
+     (n_envs=batch)     (eval mode)        postprocessor
+              │                │          env_preprocessor
+              │                │          env_postprocessor
+              └────────────────┼────────────────┘
+                               │
+                               ▼
+              ┌────────────────────────────────┐
+              │  eval_policy_all()             │
+              │    for each (suite, task):     │
+              │      eval_one()               │
+              │        eval_policy()           │
+              │          for batch in batches: │
+              │            rollout()           │
+              └────────────────┬───────────────┘
+                               │
+              ┌────────────────┼────────────────┐
+              │ rollout() 每步:                  │
+              │                                  │
+              │  observation (raw numpy)         │
+              │     │                            │
+              │     ▼                            │
+              │  preprocess_observation()        │
+              │     │ (numpy → torch, HWC → CHW) │
+              │     ▼                            │
+              │  add_envs_task()                 │
+              │     │                            │
+              │     ▼                            │
+              │  env_preprocessor()              │
+              │     │ (环境特定变换)              │
+              │     ▼                            │
+              │  preprocessor()                  │
+              │     │ (Rename → ToBatch →        │
+              │     │  Device → Normalize)       │
+              │     ▼                            │
+              │  policy.select_action()          │
+              │     │                            │
+              │     ▼                            │
+              │  postprocessor()                 │
+              │     │ (Unnormalize → CPU)        │
+              │     ▼                            │
+              │  env_postprocessor()             │
+              │     │                            │
+              │     ▼                            │
+              │  env.step(action)                │
+              │     │                            │
+              │     ▼                            │
+              │  record + render                 │
+              └──────────────────────────────────┘
+                               │
+                               ▼
+              ┌────────────────────────────────┐
+              │  聚合结果                       │
+              │  {                             │
+              │    per_task: [...],             │
+              │    per_group: {...},            │
+              │    overall: {                   │
+              │      avg_sum_reward,            │
+              │      pc_success,                │
+              │      eval_s,                    │
+              │      video_paths                │
+              │    }                            │
+              │  }                              │
+              └────────────────────────────────┘</code></pre>
+
+<hr>
+
+<h2 id="附录关键文件索引">附录：关键文件索引</h2>
+
+<table>
+<thead><tr>
+<th style="text-align:left">功能</th>
+<th style="text-align:left">文件</th>
+</tr></thead>
+<tbody>
+<tr>
+<td style="text-align:left">评估入口</td>
+<td style="text-align:left"><code>src/lerobot/scripts/lerobot_eval.py</code></td>
+</tr>
+<tr>
+<td style="text-align:left">评估配置</td>
+<td style="text-align:left"><code>src/lerobot/configs/eval.py</code> — <code>EvalPipelineConfig</code></td>
+</tr>
+<tr>
+<td style="text-align:left">环境工厂</td>
+<td style="text-align:left"><code>src/lerobot/envs/factory.py</code> — <code>make<em>env</code>, <code>make</em>env<em>pre</em>post_processors</code></td>
+</tr>
+<tr>
+<td style="text-align:left">环境工具</td>
+<td style="text-align:left"><code>src/lerobot/envs/utils.py</code> — <code>preprocess<em>observation</code>, <code>add</em>envs_task</code></td>
+</tr>
+<tr>
+<td style="text-align:left">策略工厂</td>
+<td style="text-align:left"><code>src/lerobot/policies/factory.py</code> — <code>make<em>policy</code>, <code>make</em>pre<em>post</em>processors</code></td>
+</tr>
+<tr>
+<td style="text-align:left">视频写入</td>
+<td style="text-align:left"><code>src/lerobot/utils/io<em>utils.py</code> — <code>write</em>video</code></td>
+</tr>
+<tr>
+<td style="text-align:left">训练中评估调用</td>
+<td style="text-align:left"><code>src/lerobot/scripts/lerobot<em>train.py</code> — <code>eval</em>policy_all()</code></td>
+</tr>
+</tbody></table>
+
+</body>
+</html>

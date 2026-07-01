@@ -1,0 +1,411 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>LeRobot 寻找接口详解</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    line-height: 1.7; color: #24292e; background: #fff;
+    max-width: 800px; margin: 0 auto; padding: 16px;
+    font-size: 16px;
+}
+h1 { font-size: 1.8em; border-bottom: 2px solid #e1e4e8; padding-bottom: 0.3em; margin: 24px 0 16px; }
+h2 { font-size: 1.45em; border-bottom: 1px solid #e1e4e8; padding-bottom: 0.3em; margin: 24px 0 16px; }
+h3 { font-size: 1.25em; margin: 24px 0 16px; }
+h4 { font-size: 1.1em; margin: 24px 0 16px; }
+p { margin: 0 0 16px; }
+a { color: #0366d6; text-decoration: none; }
+a:hover { text-decoration: underline; }
+code {
+    background: #f6f8fa; padding: 2px 6px; border-radius: 4px;
+    font-family: 'SF Mono', 'Fira Code', monospace; font-size: 0.9em;
+}
+pre {
+    background: #f6f8fa; padding: 16px; border-radius: 6px;
+    overflow-x: auto; margin: 0 0 16px; line-height: 1.45;
+}
+pre code { background: none; padding: 0; }
+blockquote {
+    border-left: 4px solid #dfe2e5; padding: 0 16px; color: #6a737d; margin: 0 0 16px;
+}
+table { border-collapse: collapse; width: 100%; margin: 0 0 16px; }
+th, td { border: 1px solid #dfe2e5; padding: 8px 12px; text-align: left; }
+th { background: #f6f8fa; font-weight: 600; }
+tr:nth-child(even) { background: #f6f8fa; }
+ul, ol { padding-left: 2em; margin: 0 0 16px; }
+li { margin: 4px 0; }
+img { max-width: 100%; }
+hr { border: none; border-top: 1px solid #e1e4e8; margin: 24px 0; }
+strong { font-weight: 600; }
+.index-list { list-style: none; padding: 0; }
+.index-list li { margin: 12px 0; padding: 12px 16px; background: #f6f8fa; border-radius: 8px; }
+.index-list a { font-size: 1.1em; font-weight: 500; }
+.back-link { display: inline-block; margin-bottom: 16px; color: #586069; font-size: 0.9em; }
+</style>
+</head>
+<body>
+<a class="back-link" href="index.html">← 返回索引</a>
+<h1 id="lerobot-寻找接口详解">LeRobot 寻找接口详解</h1>
+
+<blockquote>基于源码的硬件设备发现流程完整分析</blockquote>
+
+<hr>
+
+<h2 id="目录">目录</h2>
+
+<ol>
+<li><a href="#1-概述">概述</a></li>
+<li><a href="#2-寻找串口lerobot<em>find</em>port">寻找串口：lerobot<em>find</em>port</a></li>
+<li><a href="#3-寻找相机lerobot<em>find</em>cameras">寻找相机：lerobot<em>find</em>cameras</a></li>
+<li><a href="#4-寻找关节限制lerobot<em>find</em>joint<em>limits">寻找关节限制：lerobot</em>find<em>joint</em>limits</a></li>
+<li><a href="#5-其他硬件工具">其他硬件工具</a></li>
+</ol>
+
+<hr>
+
+<h2 id="1-概述">1. 概述</h2>
+
+<p>在开始使用 LeRobot 进行机器人操作之前，需要先发现并配置系统中的硬件设备。LeRobot 提供了三个核心脚本来完成这一任务：</p>
+
+<table>
+<thead><tr>
+<th style="text-align:left">脚本</th>
+<th style="text-align:left">功能</th>
+<th style="text-align:left">输入</th>
+<th style="text-align:left">输出</th>
+</tr></thead>
+<tbody>
+<tr>
+<td style="text-align:left"><code>lerobot<em>find</em>port</code></td>
+<td style="text-align:left">发现电机总线的 USB 串口</td>
+<td style="text-align:left">用户拔插 USB 线</td>
+<td style="text-align:left">串口路径（如 <code>/dev/ttyUSB0</code>）</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>lerobot<em>find</em>cameras</code></td>
+<td style="text-align:left">枚举系统中的相机设备</td>
+<td style="text-align:left">无</td>
+<td style="text-align:left">相机列表 + 可选的测试截图</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>lerobot<em>find</em>joint_limits</code></td>
+<td style="text-align:left">通过遥操作测试关节和末端执行器的工作空间</td>
+<td style="text-align:left">URDF + 遥控操作</td>
+<td style="text-align:left">关节角度限制 + EE 位置边界</td>
+</tr>
+</tbody></table>
+
+<hr>
+
+<h2 id="2-寻找串口lerobot_find_port">2. 寻找串口：lerobot<em>find</em>port</h2>
+
+<p><strong>文件</strong>: <code>src/lerobot/scripts/lerobot<em>find</em>port.py</code> (70 行)</p>
+
+<h3 id="21-实现原理">2.1 实现原理</h3>
+
+<p>采用<strong>差分法</strong>检测设备：先列出所有可用串口 → 用户拔掉设备 → 再次列出串口 → 对比差异确定目标端口。</p>
+
+<pre><code>def find_port():
+    # 第一步：列出所有当前端口
+    ports_before = find_available_ports()
+
+    # 第二步：提示用户拔掉 USB 线
+    input(&quot;Remove the USB cable from your MotorsBus and press Enter when done.&quot;)
+
+    # 第三步：再次列出端口
+    ports_after = find_available_ports()
+
+    # 第四步：对比差异
+    ports_diff = list(set(ports_before) - set(ports_after))
+
+    if len(ports_diff) == 1:
+        port = ports_diff[0]  # 唯一差异即为目标端口
+    elif len(ports_diff) == 0:
+        raise OSError(&quot;没有检测到端口差异&quot;)
+    else:
+        raise OSError(&quot;检测到多个端口差异&quot;)</code></pre>
+
+<h3 id="22-端口扫描策略">2.2 端口扫描策略</h3>
+
+<pre><code>def find_available_ports():
+    if platform.system() == &quot;Windows&quot;:
+        # Windows: 使用 pyserial 列出 COM 端口
+        ports = [port.device for port in list_ports.comports()]
+    else:
+        # Linux/macOS: 扫描 /dev/tty* 设备
+        ports = [str(path) for path in Path(&quot;/dev&quot;).glob(&quot;tty*&quot;)]
+    return ports</code></pre>
+
+<h3 id="23-使用方式">2.3 使用方式</h3>
+
+<pre><code>lerobot-find-port</code></pre>
+
+<p>交互流程：</p>
+<ol>
+<li>显示当前所有端口列表</li>
+<li>提示 &quot;Remove the USB cable from your MotorsBus and press Enter when done.&quot;</li>
+<li>用户拔掉 USB 线后按 Enter</li>
+<li>等待 0.5 秒确保端口释放</li>
+<li>显示检测到的端口（如 <code>/dev/ttyUSB0</code>）</li>
+<li>提示 &quot;Reconnect the USB cable.&quot;</li>
+</ol>
+
+<hr>
+
+<h2 id="3-寻找相机lerobot_find_cameras">3. 寻找相机：lerobot<em>find</em>cameras</h2>
+
+<p><strong>文件</strong>: <code>src/lerobot/scripts/lerobot<em>find</em>cameras.py</code> (320 行)</p>
+
+<h3 id="31-实现原理">3.1 实现原理</h3>
+
+<p>支持两种相机类型，使用各自的 <code>find_cameras()</code> 静态方法：</p>
+
+<h4 id="opencv-相机发现">OpenCV 相机发现</h4>
+
+<pre><code>def find_all_opencv_cameras():
+    opencv_cameras = OpenCVCamera.find_cameras()  # 静态方法
+    # Linux: 扫描 /dev/video*
+    # 其他: 扫描索引 0-60
+    for cam_info in opencv_cameras:
+        all_opencv_cameras_info.append(cam_info)</code></pre>
+
+<p><strong>OpenCVCamera.find<em>cameras()</strong> 实现（在 <code>src/lerobot/cameras/opencv/camera</em>opencv.py</code>）：</p>
+<ul>
+<li>Linux: 遍历 <code>/dev/video*</code> 设备</li>
+<li>其他 OS: 遍历索引 0-60</li>
+<li>对每个候选设备尝试 <code>cv2.VideoCapture(index)</code> 打开</li>
+<li>如果成功打开（<code>cap.isOpened()</code>），记录设备信息并立即释放</li>
+</ul>
+
+<h4 id="realsense-相机发现">RealSense 相机发现</h4>
+
+<pre><code>def find_all_realsense_cameras():
+    realsense_cameras = RealSenseCamera.find_cameras()</code></pre>
+
+<p>使用 Intel RealSense SDK (<code>pyrealsense2</code>) 的 <code>context.query_devices()</code> 方法查询已连接的 RealSense 设备。</p>
+
+<h3 id="32-设备信息输出">3.2 设备信息输出</h3>
+
+<p>对每个检测到的相机，输出以下元数据：</p>
+
+<pre><code>--- Detected Cameras ---
+Camera #0:
+  Type: OpenCV
+  Id: 0  (或 /dev/video0)
+  Default stream profile:
+    Width: 640
+    Height: 480
+    Fps: 30</code></pre>
+
+<h3 id="33-测试拍照功能">3.3 测试拍照功能</h3>
+
+<p>脚本还支持实际连接相机并拍摄测试照片：</p>
+
+<pre><code>def save_images_from_all_cameras(output_dir, record_time_s, camera_type):
+    # 1. 创建相机实例 (使用默认配置)
+    for cam_meta in all_camera_metadata:
+        camera_instance = create_camera_instance(cam_meta)
+        # OpenCV:  RGB 模式, 默认分辨率
+        # RealSense: RGB 模式, 默认流配置
+
+    # 2. 并行捕获 (ThreadPoolExecutor)
+    with ThreadPoolExecutor(max_workers=len(cameras) * 2) as executor:
+        while time.perf_counter() - start_time &lt; record_time_s:
+            for cam_dict in cameras_to_use:
+                future = process_camera_image(cam_dict, output_dir, ...)
+            concurrent.futures.wait(futures)
+
+    # 3. 断开所有相机
+    cleanup_cameras(cameras_to_use)</code></pre>
+
+<h3 id="34-使用方式">3.4 使用方式</h3>
+
+<pre><code># 列出所有相机
+lerobot-find-cameras
+
+# 只列出 RealSense 相机
+lerobot-find-cameras realsense
+
+# 只列出 OpenCV 相机
+lerobot-find-cameras opencv
+
+# 拍测试照片 (保存到 outputs/captured_images, 录制6秒)
+lerobot-find-cameras --output-dir outputs/captured_images --record-time-s 6</code></pre>
+
+<hr>
+
+<h2 id="4-寻找关节限制lerobot_find_joint_limits">4. 寻找关节限制：lerobot<em>find</em>joint_limits</h2>
+
+<p><strong>文件</strong>: <code>src/lerobot/scripts/lerobot<em>find</em>joint_limits.py</code> (222 行)</p>
+
+<h3 id="41-目的">4.1 目的</h3>
+
+<p>通过遥操作控制机器人运动，同时记录其关节角度和末端执行器（EE）位置的工作空间范围。这对于后续配置 IK 安全边界非常有用。</p>
+
+<h3 id="42-配置类">4.2 配置类</h3>
+
+<pre><code>@dataclass
+class FindJointLimitsConfig:
+    teleop: TeleoperatorConfig      # 主手配置
+    robot: RobotConfig              # 从手机器人配置
+    urdf_path: str                  # URDF 文件路径（用于正运动学）
+    target_frame_name: str = &quot;gripper&quot;  # EE 目标帧名称
+    teleop_time_s: float = 30       # 录制阶段时长
+    warmup_time_s: float = 5        # 预热阶段时长
+    control_loop_fps: int = 30      # 控制循环频率</code></pre>
+
+<h3 id="43-实现流程">4.3 实现流程</h3>
+
+<pre><code>def find_joint_and_ee_bounds(cfg):
+    # 1. 连接设备
+    teleop = make_teleoperator_from_config(cfg.teleop)
+    robot = make_robot_from_config(cfg.robot)
+    teleop.connect()
+    robot.connect()
+
+    # 2. 初始化正运动学 (placo C++ 库)
+    kinematics = RobotKinematics(cfg.urdf_path, cfg.target_frame_name)
+
+    # 3. 预热阶段 (warmup_time_s 秒)
+    while elapsed &lt; warmup_time_s:
+        action = teleop.get_action()     # 读取主手
+        robot.send_action(action)        # 控制从手
+        precise_sleep(...)
+
+    # 4. 录制阶段 (teleop_time_s 秒)
+    while elapsed &lt; warmup_time_s + teleop_time_s:
+        action = teleop.get_action()
+        robot.send_action(action)
+
+        # 读取关节角度
+        observation = robot.get_observation()
+        joint_positions = np.array([obs[f&quot;{key}.pos&quot;] for key in robot.bus.motors])
+
+        # 计算末端执行器位置 (FK)
+        ee_pos = kinematics.forward_kinematics(joint_positions)[:3, 3]
+        # ee_pos: (x, y, z) 平移分量
+
+        # 更新最小/最大记录
+        max_ee = np.maximum(max_ee, ee_pos)
+        min_ee = np.minimum(min_ee, ee_pos)
+        max_pos = np.maximum(max_pos, joint_positions)
+        min_pos = np.minimum(min_pos, joint_positions)
+
+    # 5. 断开设备并输出结果
+    robot.disconnect()
+    teleop.disconnect()
+
+    print(&quot;\n# End Effector Bounds (x, y, z):&quot;)
+    print(f&quot;max_ee = {r_max_ee}&quot;)
+    print(f&quot;min_ee = {r_min_ee}&quot;)
+    print(&quot;\n# Joint Position Limits (radians):&quot;)
+    print(f&quot;max_pos = {r_max_pos}&quot;)
+    print(f&quot;min_pos = {r_min_pos}&quot;)</code></pre>
+
+<h3 id="44-关键实现细节">4.4 关键实现细节</h3>
+
+<ul>
+<li><strong>RobotKinematics</strong>: 使用 <code>placo</code> C++ 库进行 URDF 解析和正运动学计算，位于 <code>src/lerobot/model/kinematics.py</code></li>
+<li><strong>数据流</strong>: 主手动作 → 从手执行 → 读取关节角度 → FK 计算 EE 位置 → 更新边界</li>
+<li><strong>两阶段设计</strong>: 预热阶段让用户确认遥操作正常工作，录制阶段才开始收集数据</li>
+<li><strong>Ctrl+C 安全</strong>: 任何时候按 Ctrl+C 都会安全断开设备并输出已收集的数据</li>
+</ul>
+
+<h3 id="45-使用方式">4.5 使用方式</h3>
+
+<pre><code>lerobot-find-joint-limits \
+  --robot.type=so100_follower \
+  --robot.port=/dev/tty.usbmodem58760432981 \
+  --robot.id=black \
+  --teleop.type=so100_leader \
+  --teleop.port=/dev/tty.usbmodem58760434471 \
+  --teleop.id=blue \
+  --urdf_path=&lt;path&gt;/SO-ARM100/Simulation/SO101/so101_new_calib.urdf \
+  --target_frame_name=gripper \
+  --teleop_time_s=30 \
+  --warmup_time_s=5</code></pre>
+
+<p>输出示例：</p>
+<pre><code># End Effector Bounds (x, y, z):
+max_ee = [0.3521, 0.2847, 0.4102]
+min_ee = [-0.2413, -0.3156, 0.0531]
+
+# Joint Position Limits (radians):
+max_pos = [3.14, 1.57, 2.09, 2.09, 6.28, 1.0]
+min_pos = [-3.14, -0.52, -0.35, -0.35, 0.0, 0.0]</code></pre>
+
+<hr>
+
+<h2 id="5-其他硬件工具">5. 其他硬件工具</h2>
+
+<h3 id="51-lerobot_setup_can">5.1 lerobot<em>setup</em>can</h3>
+
+<p><strong>文件</strong>: <code>src/lerobot/scripts/lerobot<em>setup</em>can.py</code></p>
+
+<p>配置 CAN 总线接口（用于如 Unitree G1 等通过 CAN 通信的机器人）。</p>
+
+<h3 id="52-lerobot_setup_motors">5.2 lerobot<em>setup</em>motors</h3>
+
+<p><strong>文件</strong>: <code>src/lerobot/scripts/lerobot<em>setup</em>motors.py</code></p>
+
+<p>首次设置电机 ID 和波特率（用于 Feetech/Dynamixel 电机的初始配置）。</p>
+
+<h3 id="53-lerobot_info">5.3 lerobot_info</h3>
+
+<p><strong>文件</strong>: <code>src/lerobot/scripts/lerobot_info.py</code></p>
+
+<p>显示系统信息（Python 版本、PyTorch 版本、CUDA 可用性、GPU 信息等），用于诊断环境问题。</p>
+
+<hr>
+
+<h2 id="附录关键文件索引">附录：关键文件索引</h2>
+
+<table>
+<thead><tr>
+<th style="text-align:left">功能</th>
+<th style="text-align:left">文件</th>
+</tr></thead>
+<tbody>
+<tr>
+<td style="text-align:left">寻找串口</td>
+<td style="text-align:left"><code>src/lerobot/scripts/lerobot<em>find</em>port.py</code></td>
+</tr>
+<tr>
+<td style="text-align:left">寻找相机</td>
+<td style="text-align:left"><code>src/lerobot/scripts/lerobot<em>find</em>cameras.py</code></td>
+</tr>
+<tr>
+<td style="text-align:left">寻找关节限制</td>
+<td style="text-align:left"><code>src/lerobot/scripts/lerobot<em>find</em>joint_limits.py</code></td>
+</tr>
+<tr>
+<td style="text-align:left">OpenCV 相机发现</td>
+<td style="text-align:left"><code>src/lerobot/cameras/opencv/camera<em>opencv.py</code> — <code>find</em>cameras()</code></td>
+</tr>
+<tr>
+<td style="text-align:left">RealSense 相机发现</td>
+<td style="text-align:left"><code>src/lerobot/cameras/realsense/camera<em>realsense.py</code> — <code>find</em>cameras()</code></td>
+</tr>
+<tr>
+<td style="text-align:left">运动学计算</td>
+<td style="text-align:left"><code>src/lerobot/model/kinematics.py</code> — <code>RobotKinematics</code></td>
+</tr>
+<tr>
+<td style="text-align:left">CAN 总线设置</td>
+<td style="text-align:left"><code>src/lerobot/scripts/lerobot<em>setup</em>can.py</code></td>
+</tr>
+<tr>
+<td style="text-align:left">电机初始设置</td>
+<td style="text-align:left"><code>src/lerobot/scripts/lerobot<em>setup</em>motors.py</code></td>
+</tr>
+<tr>
+<td style="text-align:left">系统信息</td>
+<td style="text-align:left"><code>src/lerobot/scripts/lerobot_info.py</code></td>
+</tr>
+</tbody></table>
+
+</body>
+</html>

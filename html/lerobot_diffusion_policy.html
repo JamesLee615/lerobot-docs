@@ -1,0 +1,947 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Diffusion Policy 在 LeRobot 框架中的具体实现</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    line-height: 1.7; color: #24292e; background: #fff;
+    max-width: 800px; margin: 0 auto; padding: 16px;
+    font-size: 16px;
+}
+h1 { font-size: 1.8em; border-bottom: 2px solid #e1e4e8; padding-bottom: 0.3em; margin: 24px 0 16px; }
+h2 { font-size: 1.45em; border-bottom: 1px solid #e1e4e8; padding-bottom: 0.3em; margin: 24px 0 16px; }
+h3 { font-size: 1.25em; margin: 24px 0 16px; }
+h4 { font-size: 1.1em; margin: 24px 0 16px; }
+p { margin: 0 0 16px; }
+a { color: #0366d6; text-decoration: none; }
+a:hover { text-decoration: underline; }
+code {
+    background: #f6f8fa; padding: 2px 6px; border-radius: 4px;
+    font-family: 'SF Mono', 'Fira Code', monospace; font-size: 0.9em;
+}
+pre {
+    background: #f6f8fa; padding: 16px; border-radius: 6px;
+    overflow-x: auto; margin: 0 0 16px; line-height: 1.45;
+}
+pre code { background: none; padding: 0; }
+blockquote {
+    border-left: 4px solid #dfe2e5; padding: 0 16px; color: #6a737d; margin: 0 0 16px;
+}
+table { border-collapse: collapse; width: 100%; margin: 0 0 16px; }
+th, td { border: 1px solid #dfe2e5; padding: 8px 12px; text-align: left; }
+th { background: #f6f8fa; font-weight: 600; }
+tr:nth-child(even) { background: #f6f8fa; }
+ul, ol { padding-left: 2em; margin: 0 0 16px; }
+li { margin: 4px 0; }
+img { max-width: 100%; }
+hr { border: none; border-top: 1px solid #e1e4e8; margin: 24px 0; }
+strong { font-weight: 600; }
+.index-list { list-style: none; padding: 0; }
+.index-list li { margin: 12px 0; padding: 12px 16px; background: #f6f8fa; border-radius: 8px; }
+.index-list a { font-size: 1.1em; font-weight: 500; }
+.back-link { display: inline-block; margin-bottom: 16px; color: #586069; font-size: 0.9em; }
+</style>
+</head>
+<body>
+<a class="back-link" href="index.html">← 返回索引</a>
+<h1 id="diffusion-policy-在-lerobot-框架中的具体实现">Diffusion Policy 在 LeRobot 框架中的具体实现</h1>
+
+<blockquote>基于 <code>src/lerobot/policies/diffusion/</code> 源码的深度解析</blockquote>
+
+<hr>
+
+<h2 id="目录">目录</h2>
+
+<ol>
+<li><a href="#1-概述">概述</a></li>
+<li><a href="#2-文件结构">文件结构</a></li>
+<li><a href="#3-配置类diffusionconfig">配置类：DiffusionConfig</a></li>
+<li><a href="#4-策略类diffusionpolicy">策略类：DiffusionPolicy</a></li>
+<li><a href="#5-扩散模型diffusionmodel">扩散模型：DiffusionModel</a></li>
+<li><a href="#6-rgb-编码器diffusionrgbencoder">RGB 编码器：DiffusionRgbEncoder</a></li>
+<li><a href="#7-条件-u-net-1ddiffusionconditionalunet1d">条件 U-Net 1D：DiffusionConditionalUnet1d</a></li>
+<li><a href="#8-触觉传感器集成">触觉传感器集成</a></li>
+<li><a href="#9-数据处理与训练流程">数据处理与训练流程</a></li>
+<li><a href="#10-推理流程">推理流程</a></li>
+<li><a href="#11-diffusion-policy-网络架构图">Diffusion Policy 网络架构图</a></li>
+</ol>
+
+<hr>
+
+<h2 id="1-概述">1. 概述</h2>
+
+<p>Diffusion Policy 来自论文 <em>Diffusion Policy: Visuomotor Policy Learning via Action Diffusion</em> (https://huggingface.co/papers/2303.04137)。</p>
+
+<p><strong>核心思想</strong>：将机器人动作预测建模为条件扩散去噪过程——从纯噪声开始，在观察条件的引导下，通过多步迭代去噪生成连贯的动作轨迹。</p>
+
+<table>
+<thead><tr>
+<th style="text-align:left">特性</th>
+<th style="text-align:left">Diffusion Policy</th>
+</tr></thead>
+<tbody>
+<tr>
+<td style="text-align:left"><strong>动作预测方式</strong></td>
+<td style="text-align:left">迭代式扩散去噪，从纯噪声逐步去噪</td>
+</tr>
+<tr>
+<td style="text-align:left"><strong>核心网络</strong></td>
+<td style="text-align:left">ResNet 视觉编码器 + 1D 条件 U-Net</td>
+</tr>
+<tr>
+<td style="text-align:left"><strong>观察步数</strong></td>
+<td style="text-align:left"><code>n<em>obs</em>steps=2</code> (含历史帧)</td>
+</tr>
+<tr>
+<td style="text-align:left"><strong>动作 Horizon</strong></td>
+<td style="text-align:left"><code>horizon=16</code> (16步动作预测)</td>
+</tr>
+<tr>
+<td style="text-align:left"><strong>执行步数</strong></td>
+<td style="text-align:left"><code>n<em>action</em>steps=8</code> (horizon 的一部分)</td>
+</tr>
+<tr>
+<td style="text-align:left"><strong>训练目标</strong></td>
+<td style="text-align:left">MSE (预测噪声 ε 或原始动作)</td>
+</tr>
+<tr>
+<td style="text-align:left"><strong>推理机制</strong></td>
+<td style="text-align:left">多步去噪循环 (DDPM/DDIM)</td>
+</tr>
+<tr>
+<td style="text-align:left"><strong>时序机制</strong></td>
+<td style="text-align:left">队列：观察历史缓存 + 动作出队</td>
+</tr>
+<tr>
+<td style="text-align:left"><strong>条件注入</strong></td>
+<td style="text-align:left">FiLM 调制 (扩散步嵌入)</td>
+</tr>
+<tr>
+<td style="text-align:left"><strong>优化器</strong></td>
+<td style="text-align:left">Adam, lr=1e-4, betas=(0.95, 0.999)</td>
+</tr>
+<tr>
+<td style="text-align:left"><strong>学习率调度</strong></td>
+<td style="text-align:left">Cosine with Warmup (500步)</td>
+</tr>
+<tr>
+<td style="text-align:left"><strong>帧步幅</strong></td>
+<td style="text-align:left"><code>frame_stride=3</code> (子采样，降低帧率)</td>
+</tr>
+<tr>
+<td style="text-align:left"><strong>图像预处理</strong></td>
+<td style="text-align:left">Resize → RandomCrop (训练) / CenterCrop (推理)</td>
+</tr>
+</tbody></table>
+
+<hr>
+
+<h2 id="2-文件结构">2. 文件结构</h2>
+
+<pre><code>src/lerobot/policies/diffusion/
+├── __init__.py
+├── configuration_diffusion.py    # DiffusionConfig 配置类
+└── modeling_diffusion.py         # DiffusionPolicy + DiffusionModel + UNet + SpatialSoftmax + RgbEncoder</code></pre>
+
+<hr>
+
+<h2 id="3-配置类diffusionconfig">3. 配置类：DiffusionConfig</h2>
+
+<p><strong>文件</strong>: <code>src/lerobot/policies/diffusion/configuration_diffusion.py:27-283</code></p>
+
+<pre><code>@PreTrainedConfig.register_subclass(&quot;diffusion&quot;)
+@dataclass
+class DiffusionConfig(PreTrainedConfig):
+    # === 输入/输出结构 ===
+    n_obs_steps: int = 2          # 使用当前帧 + 1 帧历史
+    horizon: int = 16             # 扩散模型预测 horizon 步动作
+    n_action_steps: int = 8       # 实际执行 horizon 中的 8 步
+    frame_stride: int = 1         # 帧子采样步长
+    drop_n_last_frames: int = 7   # 自动计算: (horizon - n_action_steps - n_obs_steps + 1) * frame_stride
+
+    # === 归一化映射 ===
+    normalization_mapping: dict = {
+        &quot;VISUAL&quot;: NormalizationMode.MEAN_STD,
+        &quot;STATE&quot;: NormalizationMode.MIN_MAX,      # 状态用 min-max
+        &quot;ACTION&quot;: NormalizationMode.MIN_MAX,     # 动作用 min-max
+        &quot;TACTILE&quot;: NormalizationMode.MEAN_STD,
+    }
+
+    # === 视觉骨干网络 ===
+    vision_backbone: str = &quot;resnet18&quot;
+    resize_shape: tuple[int, int] | None = None  # 图像缩放目标
+    crop_ratio: float = 1.0                     # 裁剪比例
+    crop_shape: tuple[int, int] | None = None
+    crop_is_random: bool = True                 # 训练时随机裁剪
+    pretrained_backbone_weights: str | None = None
+    use_group_norm: bool = True                 # 用 GroupNorm 替换 BatchNorm
+    spatial_softmax_num_keypoints: int = 32     # Spatial Softmax 关键点
+    use_separate_rgb_encoder_per_camera: bool = False
+
+    # === U-Net 架构 ===
+    down_dims: tuple[int, ...] = (512, 1024, 2048)  # 下采样各阶段特征维度
+    kernel_size: int = 5
+    n_groups: int = 8
+    diffusion_step_embed_dim: int = 128
+    use_film_scale_modulation: bool = True
+
+    # === 噪声调度器 ===
+    noise_scheduler_type: str = &quot;DDPM&quot;
+    num_train_timesteps: int = 100
+    beta_schedule: str = &quot;squaredcos_cap_v2&quot;
+    beta_start: float = 0.0001
+    beta_end: float = 0.02
+    prediction_type: str = &quot;epsilon&quot;  # 预测噪声 (而非原始样本)
+    clip_sample: bool = True
+    clip_sample_range: float = 1.0
+
+    # === 推理 ===
+    num_inference_steps: int | None = None  # 默认 = num_train_timesteps
+
+    # === 触觉传感器 ===
+    use_tactile: bool = False
+    tactile_encoder_type: str = &quot;cnn&quot;
+    tactile_input_shape: tuple = (12, 32)
+    tactile_dropout: float = 0.3
+    tactile_feature_dim: int = 32    # 每个 chunk 的特征维度
+    tactile_features: list[str] | None = None
+    n_tactile_chunks: int = 1        # 每个传感器的特征 chunk 数
+
+    # === 优化 ===
+    compile_model: bool = False
+    compile_mode: str = &quot;reduce-overhead&quot;
+    do_mask_loss_for_padding: bool = False
+    optimizer_lr: float = 1e-4
+    optimizer_betas: tuple = (0.95, 0.999)
+    scheduler_name: str = &quot;cosine&quot;
+    scheduler_warmup_steps: int = 500</code></pre>
+
+<h3 id="关键设计决策">关键设计决策</h3>
+
+<ol>
+<li><strong><code>drop<em>n</em>last<em>frames</code> 自动计算</strong>：<code>(horizon - n</em>action<em>steps - n</em>obs<em>steps + 1) <em> frame</em>stride</code>，默认 <code>(16-8-2+1)</em>1 = 7</code>，丢弃 episode 末尾被 padding 的不完整帧。</li>
+</ol>
+
+<ol>
+<li><strong>U-Net 下采样兼容性</strong>：<code>downsampling<em>factor = 2^len(down</em>dims) = 8</code>，horizon 必须是 8 的倍数。</li>
+</ol>
+
+<ol>
+<li><strong>图像预处理流程</strong>：<code>原始图像 → Resize → RandomCrop (训练) / CenterCrop (推理)</code></li>
+</ol>
+
+<ol>
+<li><strong><code>frame<em>stride</code> 机制</strong>：在 30Hz 数据集上以 <code>frame</em>stride=3</code> 训练等效于在 10Hz 训练。</li>
+</ol>
+
+<hr>
+
+<h2 id="4-策略类diffusionpolicy">4. 策略类：DiffusionPolicy</h2>
+
+<p><strong>文件</strong>: <code>src/lerobot/policies/diffusion/modeling_diffusion.py:48-158</code></p>
+
+<pre><code>class DiffusionPolicy(PreTrainedPolicy):
+    config_class = DiffusionConfig
+    name = &quot;diffusion&quot;
+
+    def __init__(self, config: DiffusionConfig, **kwargs):
+        super().__init__(config)
+        config.validate_features()
+        self._queues = None         # 观察和动作历史队列
+        self.diffusion = DiffusionModel(config)  # 底层扩散模型
+        self.reset()</code></pre>
+
+<h3 id="41-reset-初始化队列">4.1 <code>reset</code> — 初始化队列</h3>
+
+<pre><code>def reset(self):
+    &quot;&quot;&quot;环境重置时调用，清空所有缓存&quot;&quot;&quot;
+    self._queues = {
+        ACTION: deque(maxlen=n_action_steps),                  # 动作队列 (长度=8)
+    }
+    if robot_state:
+        self._queues[OBS_STATE] = deque(maxlen=n_obs_steps)    # 状态队列 (长度=2)
+    if image_features:
+        self._queues[OBS_IMAGES] = deque(maxlen=n_obs_steps)   # 图像队列
+    if env_state:
+        self._queues[OBS_ENV_STATE] = deque(maxlen=n_obs_steps)
+    if use_tactile:
+        for key in tactile_keys:
+            self._queues[key] = deque(maxlen=n_obs_steps)       # 触觉队列</code></pre>
+
+<h3 id="42-select_action-动作选择">4.2 <code>select_action</code> — 动作选择</h3>
+
+<pre><code>@torch.no_grad()
+def select_action(self, batch: dict[str, Tensor], noise=None) -&gt; Tensor:
+    &quot;&quot;&quot;
+    时序示意图 (n_obs_steps=2, horizon=16, n_action_steps=8):
+
+    时间步:        | t-1  | t    | t+1  | ... | t+7  | t+8  | ... | t+14 |
+    观察中的帧:    | YES  | YES  | NO   | ... | NO   | NO   | ... | NO   |
+    去噪生成动作:  | YES  | YES  | YES  | ... | YES  | YES  | ... | YES  |
+    实际执行动作:  | NO   | YES  | YES  | ... | YES  | NO   | ... | NO   |
+    &quot;&quot;&quot;
+    # 多相机图像堆叠: (B, C, H, W) → (B, num_cameras, C, H, W)
+    if image_features:
+        batch = dict(batch)
+        batch[OBS_IMAGES] = torch.stack([batch[key] for key in image_features], dim=-4)
+
+    # 将当前观察推入队列
+    self._queues = populate_queues(self._queues, batch)
+
+    # 动作队列为空 → 从模型去噪生成新动作
+    if len(self._queues[ACTION]) == 0:
+        actions = self.predict_action_chunk(batch, noise=noise)  # (B, n_action_steps, action_dim)
+        self._queues[ACTION].extend(actions.transpose(0, 1))     # 转置后入队
+
+    return self._queues[ACTION].popleft()</code></pre>
+
+<p><strong><code>populate_queues</code> 辅助函数</strong> (<code>src/lerobot/policies/utils.py</code>):</p>
+
+<pre><code>def populate_queues(queues, batch):
+    for key in batch:
+        if key not in queues:
+            continue
+        for i in range(len(batch[key])):
+            queues[key].append(batch[key][i])
+    return queues</code></pre>
+
+<p><strong>队列机制</strong>：</p>
+<ol>
+<li>每次 <code>select<em>action</code>，当前观察被推入对应的观察队列（长度=<code>n</em>obs_steps</code>）</li>
+<li>动作队列为空时 → 从观察队列取最近 <code>n<em>obs</em>steps</code> 帧 → 堆叠 → 去噪生成 horizon=16 步 → 取前 <code>n<em>action</em>steps=8</code> 步入队</li>
+<li>每步弹出一个动作执行</li>
+<li>避免每步都跑扩散去噪（每 8 步才跑一次）</li>
+</ol>
+
+<h3 id="43-predict_action_chunk-预测">4.3 <code>predict<em>action</em>chunk</code> — 预测</h3>
+
+<pre><code>@torch.no_grad()
+def predict_action_chunk(self, batch, noise=None) -&gt; Tensor:
+    # 从队列堆叠观察历史
+    batch = {k: torch.stack(list(self._queues[k]), dim=1) for k in batch if k in self._queues}
+    # batch[OBS_STATE]:   (B, n_obs_steps, state_dim)           → (B, 2, 6)
+    # batch[OBS_IMAGES]:  (B, n_obs_steps, num_cameras, C, H, W) → (B, 2, 2, 3, H, W)
+
+    actions = self.diffusion.generate_actions(batch, noise=noise)
+    return actions  # (B, n_action_steps, action_dim)</code></pre>
+
+<h3 id="44-forward-训练">4.4 <code>forward</code> — 训练</h3>
+
+<pre><code>def forward(self, batch) -&gt; tuple[Tensor, None]:
+    if image_features:
+        batch = dict(batch)
+        for key in image_features:
+            if n_obs_steps == 1 and batch[key].ndim == 4:
+                batch[key] = batch[key].unsqueeze(1)  # (B, C, H, W) → (B, 1, C, H, W)
+        batch[OBS_IMAGES] = torch.stack([batch[key] for key in image_features], dim=-4)
+
+    loss = self.diffusion.compute_loss(batch)
+    return loss, None</code></pre>
+
+<hr>
+
+<h2 id="5-扩散模型diffusionmodel">5. 扩散模型：DiffusionModel</h2>
+
+<p><strong>文件</strong>: <code>src/lerobot/policies/diffusion/modeling_diffusion.py:173-413</code></p>
+
+<h3 id="51-__init__-组件构建">5.1 <code><strong>init</strong></code> — 组件构建</h3>
+
+<pre><code>class DiffusionModel(nn.Module):
+    def __init__(self, config: DiffusionConfig):
+        super().__init__()
+        self.config = config
+
+        # === 计算全局条件维度 ===
+        global_cond_dim = robot_state_dim if robot_state else 0
+
+        # === RGB 编码器 ===
+        if image_features:
+            num_images = len(image_features)
+            if use_separate_rgb_encoder_per_camera:
+                encoders = [DiffusionRgbEncoder(config) for _ in range(num_images)]
+                self.rgb_encoder = nn.ModuleList(encoders)
+                global_cond_dim += encoders[0].feature_dim * num_images   # 64 * N
+            else:
+                self.rgb_encoder = DiffusionRgbEncoder(config)
+                global_cond_dim += self.rgb_encoder.feature_dim * num_images  # 64 * N
+
+        if env_state:
+            global_cond_dim += env_state_dim
+
+        # === 触觉编码器 ===
+        if use_tactile:
+            n_sensors = len(tactile_features) if tactile_features else 1
+            self.tactile_encoder = TactileTokenEncoder(
+                encoder_type=config.tactile_encoder_type,
+                input_shape=config.tactile_input_shape,
+                feature_dim=config.tactile_feature_dim,   # 64
+                n_tokens=config.n_tactile_chunks,         # 1
+                dropout=config.tactile_dropout,
+            )
+            global_cond_dim += n_sensors * n_chunks * tactile_feature_dim
+
+        # === U-Net (1D) ===
+        self.unet = DiffusionConditionalUnet1d(config, global_cond_dim=global_cond_dim * config.n_obs_steps)
+
+        # === 噪声调度器 ===
+        self.noise_scheduler = _make_noise_scheduler(
+            config.noise_scheduler_type,  # &quot;DDPM&quot; 或 &quot;DDIM&quot;
+            num_train_timesteps=config.num_train_timesteps,  # 100
+            beta_start=config.beta_start, beta_end=config.beta_end,
+            beta_schedule=config.beta_schedule,
+            clip_sample=config.clip_sample,
+            clip_sample_range=config.clip_sample_range,
+            prediction_type=config.prediction_type,  # &quot;epsilon&quot;
+        )
+
+        self.num_inference_steps = config.num_inference_steps or config.num_train_timesteps</code></pre>
+
+<h3 id="52-训练compute_loss">5.2 训练：<code>compute_loss</code></h3>
+
+<pre><code>def compute_loss(self, batch) -&gt; Tensor:
+    &quot;&quot;&quot;
+    batch:
+      OBS_STATE:    (B, n_obs_steps, state_dim)       如 (16, 2, 6)
+      OBS_IMAGES:   (B, n_obs_steps, num_cameras, C, H, W)
+      ACTION:       (B, horizon, action_dim)           如 (16, 16, 6)
+      action_is_pad: (B, horizon) 填充掩码
+    &quot;&quot;&quot;
+    # 第1步: 编码全局条件
+    global_cond = self._prepare_global_conditioning(batch)  # (B, global_cond_dim × n_obs_steps)
+
+    # 第2步: 前向扩散 — 采样噪声并加噪
+    trajectory = batch[ACTION]                              # (B, horizon, action_dim)
+    eps = torch.randn(trajectory.shape)                      # 随机噪声
+    timesteps = torch.randint(0, num_train_timesteps, (B,)).long()  # 随机时间步
+    noisy_trajectory = self.noise_scheduler.add_noise(trajectory, eps, timesteps)
+    # x_t = √(ᾱ_t) × x_0 + √(1-ᾱ_t) × ε
+
+    # 第3步: U-Net 预测
+    pred = self.unet(noisy_trajectory, timesteps, global_cond=global_cond)
+
+    # 第4步: MSE 损失
+    if prediction_type == &quot;epsilon&quot;:
+        target = eps               # 预测噪声
+    elif prediction_type == &quot;sample&quot;:
+        target = trajectory        # 预测原始样本
+
+    loss = F.mse_loss(pred, target, reduction=&quot;none&quot;)
+    if do_mask_loss_for_padding:
+        loss = loss * ~batch[&quot;action_is_pad&quot;].unsqueeze(-1)
+    return loss.mean()</code></pre>
+
+<h3 id="53-推理generate_actions-conditional_sample">5.3 推理：<code>generate<em>actions</code> + <code>conditional</em>sample</code></h3>
+
+<pre><code>def generate_actions(self, batch, noise=None) -&gt; Tensor:
+    # 编码全局条件
+    global_cond = self._prepare_global_conditioning(batch)
+
+    # 迭代去噪: 从 (B, horizon, action_dim) 的纯噪声开始
+    actions = self.conditional_sample(batch_size, global_cond=global_cond, noise=noise)
+    # (B, horizon, action_dim) = (B, 16, 6)
+
+    # 截取 n_action_steps 动作 (从当前观察位置开始)
+    start = n_obs_steps - 1       # = 1
+    end = start + n_action_steps  # = 9
+    actions = actions[:, start:end]  # (B, 8, 6)
+    return actions
+
+def conditional_sample(self, batch_size, global_cond, generator, noise):
+    &quot;&quot;&quot;DDPM / DDIM 迭代去噪&quot;&quot;&quot;
+    sample = noise if noise is not None else torch.randn((batch_size, horizon, action_dim))
+    self.noise_scheduler.set_timesteps(self.num_inference_steps)
+
+    for t in self.noise_scheduler.timesteps:
+        model_output = self.unet(sample, torch.full((batch_size,), t, dtype=torch.long), global_cond=global_cond)
+        sample = self.noise_scheduler.step(model_output, t, sample, generator=generator).prev_sample
+
+    return sample</code></pre>
+
+<h3 id="54-全局条件编码_prepare_global_conditioning">5.4 全局条件编码：<code><em>prepare</em>global_conditioning</code></h3>
+
+<pre><code>def _prepare_global_conditioning(self, batch) -&gt; Tensor:
+    &quot;&quot;&quot;
+    编码所有模态 → 拼接 → 展平为 (B, global_cond_dim × n_obs_steps)
+    &quot;&quot;&quot;
+    global_cond_feats = []
+
+    # (1) 机器人状态: (B, n_obs_steps, state_dim) 直接使用
+    if robot_state:
+        global_cond_feats.append(batch[OBS_STATE])
+
+    # (2) 图像特征: ResNet → SpatialSoftmax → Linear(64)
+    if image_features:
+        if use_separate_rgb_encoder_per_camera:
+            # 每个相机独立编码器
+            images_per_camera = einops.rearrange(batch[OBS_IMAGES], &quot;b s n ... -&gt; n (b s) ...&quot;)
+            img_features_list = torch.cat([enc(imgs) for enc, imgs in zip(rgb_encoder, images_per_camera)])
+            img_features = einops.rearrange(img_features_list, &quot;(n b s) ... -&gt; b s (n ...)&quot;, b=B, s=n_obs_steps)
+        else:
+            # 共享编码器
+            img_features = self.rgb_encoder(einops.rearrange(batch[OBS_IMAGES], &quot;b s n ... -&gt; (b s n) ...&quot;))
+            img_features = einops.rearrange(img_features, &quot;(b s n) ... -&gt; b s (n ...)&quot;, b=B, s=n_obs_steps)
+        global_cond_feats.append(img_features)  # (B, n_obs_steps, 64 × num_cameras)
+
+    # (3) 环境状态: (B, n_obs_steps, env_dim)
+    if env_state:
+        global_cond_feats.append(batch[OBS_ENV_STATE])
+
+    # (4) 触觉特征: CNN → flatten → (B, n_obs_steps, n_chunks*feat_dim)
+    if use_tactile:
+        for tactile_key in tactile_keys:
+            tactile_data = batch[tactile_key]        # (B, n_obs_steps, H, W)
+            bs, n_obs = tactile_data.shape[:2]
+            tactile_flat = tactile_data.flatten(0, 1)  # (B*n_obs, H, W)
+            chunks = self.tactile_encoder(tactile_flat)  # (B*n_obs, n_chunks, feat_dim)
+            chunks = chunks.flatten(1)                   # (B*n_obs, n_chunks*feat_dim)
+            chunks = chunks.view(bs, n_obs, -1)          # (B, n_obs_steps, n_chunks*feat_dim)
+            global_cond_feats.append(chunks)
+
+    # 拼接 → 展平时序维度
+    return torch.cat(global_cond_feats, dim=-1).flatten(start_dim=1)
+    # (B, sum_all_dims × n_obs_steps)</code></pre>
+
+<hr>
+
+<h2 id="6-rgb-编码器diffusionrgbencoder">6. RGB 编码器：DiffusionRgbEncoder</h2>
+
+<p><strong>文件</strong>: <code>src/lerobot/policies/diffusion/modeling_diffusion.py:487-548</code></p>
+
+<pre><code>class DiffusionRgbEncoder(nn.Module):
+    def __init__(self, config: DiffusionConfig):
+        super().__init__()
+
+        # 图像预处理
+        if config.resize_shape is not None:
+            self.resize = torchvision.transforms.Resize(config.resize_shape)
+        if config.crop_shape is not None:
+            self.center_crop = torchvision.transforms.CenterCrop(crop_shape)
+            self.maybe_random_crop = (
+                torchvision.transforms.RandomCrop(crop_shape)
+                if config.crop_is_random else self.center_crop
+            )
+
+        # ResNet 骨干 (去掉 avgpool + fc)
+        backbone_model = getattr(torchvision.models, config.vision_backbone)(
+            weights=config.pretrained_backbone_weights
+        )
+        self.backbone = nn.Sequential(*list(backbone_model.children())[:-2])
+
+        # 可选: BatchNorm → GroupNorm (适合小 batch size)
+        if config.use_group_norm:
+            self.backbone = _replace_submodules(
+                root_module=self.backbone,
+                predicate=lambda x: isinstance(x, nn.BatchNorm2d),
+                func=lambda x: nn.GroupNorm(num_groups=x.num_features // 16, num_channels=x.num_features),
+            )
+
+        # Spatial Softmax 池化 → 32 个关键点
+        dummy_shape = compute_feature_map_shape()
+        self.pool = SpatialSoftmax(dummy_shape[1:], num_kp=config.spatial_softmax_num_keypoints)  # 32
+
+        # 输出投影
+        self.feature_dim = config.spatial_softmax_num_keypoints * 2  # 64
+        self.out = nn.Linear(config.spatial_softmax_num_keypoints * 2, self.feature_dim)
+
+    def forward(self, x: Tensor) -&gt; Tensor:
+        &quot;&quot;&quot;x: (B, C, H, W) → (B, 64)&quot;&quot;&quot;
+        if self.resize: x = self.resize(x)
+        if self.do_crop:
+            x = self.maybe_random_crop(x) if self.training else self.center_crop(x)
+        x = self.backbone(x)    # ResNet → (B, C_feat, H_feat, W_feat)
+        x = self.pool(x)        # Spatial Softmax → (B, 32, 2)  32个 (x,y) 关键点
+        x = x.flatten(1)       # (B, 64)
+        x = self.out(x)         # (B, 64) 最终特征
+        return x</code></pre>
+
+<h3 id="spatial-softmax">Spatial Softmax</h3>
+
+<p>Diffusion Policy 的关键视觉特征提取器，将 2D 特征图转换为一组空间关键点坐标：</p>
+
+<pre><code>class SpatialSoftmax(nn.Module):
+    &quot;&quot;&quot;
+    输入: (B, C, H, W) 特征图
+    输出: (B, K, 2) K 个关键点的 (x,y) 归一化坐标 [-1, 1]
+
+    步骤:
+    1. 可选 1x1 Conv 调整通道数
+    2. 每个通道做空间 softmax
+    3. 计算期望坐标 = softmax_weights @ pos_grid
+    &quot;&quot;&quot;
+    def __init__(self, input_shape, num_kp=None):
+        self._in_c, self._in_h, self._in_w = input_shape
+        if num_kp is not None:
+            self.nets = nn.Conv2d(self._in_c, num_kp, kernel_size=1)
+        # 预计算归一化坐标网格
+        pos_x, pos_y = np.meshgrid(
+            np.linspace(-1, 1, self._in_w), np.linspace(-1, 1, self._in_h)
+        )
+        self.register_buffer(&quot;pos_grid&quot;, torch.cat([pos_x.reshape(-1,1), pos_y.reshape(-1,1)], dim=1))
+
+    def forward(self, features: Tensor) -&gt; Tensor:
+        if self.nets is not None:
+            features = self.nets(features)
+        features = features.reshape(-1, self._in_h * self._in_w)   # (B*K, H*W)
+        attention = F.softmax(features, dim=-1)                     # 通道级 softmax
+        expected_xy = attention @ self.pos_grid                    # (B*K, 2) 期望坐标
+        return expected_xy.view(-1, self._out_c, 2)                # (B, K, 2)</code></pre>
+
+<hr>
+
+<h2 id="7-条件-u-net-1ddiffusionconditionalunet1d">7. 条件 U-Net 1D：DiffusionConditionalUnet1d</h2>
+
+<p><strong>架构</strong>：带有 FiLM 条件调制的 1D 卷积 U-Net，定义在 <code>modeling_diffusion.py</code> 后半部分。</p>
+
+<pre><code>输入: noisy_trajectory (B, horizon, action_dim)     → (B, 16, 6)
+       timestep_embedding (B, 128)  +  global_cond (B, cond_dim)
+
+┌─────────────────────────────────────────────┐
+│ 编码器 (下采样, stride=2)                    │
+│                                             │
+│  DownBlock1: Conv1d(6→512)                  │
+│    ├── ResidualBlock: Conv→FiLM→Conv→FiLM   │
+│    └── Downsample                             │  (B, 512, 8)
+│                                             │
+│  DownBlock2: Conv1d(512→1024)               │
+│    └── (B, 1024, 4)                          │
+│                                             │
+│  DownBlock3: Conv1d(1024→2048)              │
+│    └── (B, 2048, 2)                          │
+└─────────────────────────────────────────────┘
+                     │
+┌────────────────────▼────────────────────────┐
+│ 瓶颈 MiddleBlock: 2× ResBlock               │  (B, 2048, 2)
+└────────────────────┬────────────────────────┘
+                     │
+┌────────────────────▼────────────────────────┐
+│ 解码器 (上采样 + skip connections)           │
+│                                             │
+│  UpBlock3: Upsample → Conv(2048→1024)       │
+│    └── + skip from Down2 → (B, 1024, 4)     │
+│                                             │
+│  UpBlock2: Upsample → Conv(1024→512)        │
+│    └── + skip from Down1 → (B, 512, 8)      │
+│                                             │
+│  UpBlock1: Upsample → Conv(512→action_dim)  │
+│    └── (B, 6, 16)                           │
+└─────────────────────────────────────────────┘
+                     │
+              最终: Conv1d(1×1) → (B, horizon, action_dim)</code></pre>
+
+<h3 id="film-调制细节">FiLM 调制细节</h3>
+
+<pre><code># 每个残差块内:
+emb = concat([timestep_embedding(t), global_cond])  # (B, 128 + cond_dim)
+emb = Linear → Mish → Linear                         # 投影到 scale + bias
+
+if use_film_scale_modulation:
+    out = conv(out) * (1 + scale) + bias             # 同时调制 scale 和 bias
+else:
+    out = conv(out) + bias                           # 仅调制 bias</code></pre>
+
+<h3 id="特征维度变化-down_dims512-1024-2048">特征维度变化 (down_dims=(512, 1024, 2048))</h3>
+
+<pre><code>输入:     (B,   6, 16)     action_dim=6, horizon=16
+Down1:    (B, 512,  8)     stride=2
+Down2:    (B,1024,  4)     stride=2
+Down3:    (B,2048,  2)     stride=2
+Middle:   (B,2048,  2)
+Up3:      (B,1024,  4)     skip + conv
+Up2:      (B, 512,  8)     skip + conv
+Up1:      (B,   6, 16)     最终卷积
+输出:     (B,  16,  6)     horizon × action_dim</code></pre>
+
+<hr>
+
+<h2 id="8-触觉传感器集成">8. 触觉传感器集成</h2>
+
+<h3 id="81-共享触觉编码器">8.1 共享触觉编码器</h3>
+
+<p><strong>文件</strong>: <code>src/lerobot/policies/tactile/encoder.py</code></p>
+
+<ul>
+<li><strong><code>TactileCNN</code></strong>: <code>Conv→BN→ReLU→MaxPool</code> × 3 → <code>Flatten→Linear→ReLU→Dropout→Linear</code>。输入 <code>(B, H, W)</code>，输出 <code>(B, feature_dim)</code></li>
+<li><strong><code>TactileAttentionCNN</code></strong>: 额外的空间注意力门控 + GlobalAvgPool + GlobalMaxPool</li>
+<li><strong><code>TactileTokenEncoder</code></strong>: 包装器，可选 <code>Linear(feature<em>dim, n</em>tokens*feature_dim)</code> 投影到多个 token</li>
+</ul>
+
+<h3 id="82-dp-中的触觉集成方式">8.2 DP 中的触觉集成方式</h3>
+
+<p>在 DP 中，触觉特征被<strong>展平并拼接到全局条件向量</strong>中，通过 FiLM 调制影响 U-Net 的每一层：</p>
+
+<pre><code># 每个传感器: (B, n_obs_steps, H, W)
+tactile_data = batch[tactile_key]
+bs, n_obs = tactile_data.shape[:2]
+tactile_flat = tactile_data.flatten(0, 1)              # (B*n_obs, H, W)
+chunks = self.tactile_encoder(tactile_flat)            # (B*n_obs, n_chunks, feat_dim)
+chunks = chunks.flatten(1)                             # (B*n_obs, n_chunks*feat_dim)
+chunks = chunks.view(bs, n_obs, -1)                    # (B, n_obs, n_chunks*feat_dim)
+global_cond_feats.append(chunks)  # 拼入全局条件</code></pre>
+
+<p><strong>与 ACT 的关键区别</strong>：</p>
+<ul>
+<li>ACT：触觉 token 是独立的序列元素，有位置编码，参与 Transformer 自注意力</li>
+<li>DP：触觉特征被展平为全局条件向量的一部分，通过 FiLM 注入到卷积层的每个残差块</li>
+</ul>
+
+<hr>
+
+<h2 id="9-数据处理与训练流程">9. 数据处理与训练流程</h2>
+
+<h3 id="91-delta-timestamps-配置">9.1 Delta Timestamps 配置</h3>
+
+<pre><code># DiffusionConfig (n_obs_steps=2, frame_stride=3 示例)
+observation_delta_indices = [
+    i * frame_stride for i in range(1 - n_obs_steps, 1)
+]
+# = [-3, 0]  → 取当前帧(t=0)和3步前的帧(t=-3)
+
+action_delta_indices = [
+    i * frame_stride for i in range(1 - n_obs_steps, 1 - n_obs_steps + horizon)
+]
+# = [-3, 0, 3, 6, ..., 42]  → 从 t=-3 开始取 horizon=16 步动作</code></pre>
+
+<h3 id="92-episodeawaresampler-drop_n_last_frames">9.2 EpisodeAwareSampler + drop<em>n</em>last_frames</h3>
+
+<pre><code># DP 训练专用采样器：丢弃 episode 末尾 N 帧
+sampler = EpisodeAwareSampler(
+    dataset.meta.episodes[&quot;dataset_from_index&quot;],
+    dataset.meta.episodes[&quot;dataset_to_index&quot;],
+    episode_indices_to_use=dataset.episodes,
+    drop_n_last_frames=cfg.policy.drop_n_last_frames,  # = 7
+    shuffle=True,
+)</code></pre>
+
+<p>每个 episode 的有效采样范围：<code>[dataset<em>from</em>index, dataset<em>to</em>index - drop<em>n</em>last_frames)</code></p>
+
+<h3 id="93-optimizer-和-scheduler">9.3 Optimizer 和 Scheduler</h3>
+
+<table>
+<thead><tr>
+<th style="text-align:left">参数</th>
+<th style="text-align:left">Diffusion Policy</th>
+</tr></thead>
+<tbody>
+<tr>
+<td style="text-align:left"><strong>优化器</strong></td>
+<td style="text-align:left"><code>AdamConfig(lr=1e-4, betas=(0.95, 0.999), weight_decay=1e-6)</code></td>
+</tr>
+<tr>
+<td style="text-align:left"><strong>参数分组</strong></td>
+<td style="text-align:left">所有参数统一 (无 backbone 特殊处理)</td>
+</tr>
+<tr>
+<td style="text-align:left"><strong>调度器</strong></td>
+<td style="text-align:left"><code>DiffuserSchedulerConfig(name=&quot;cosine&quot;, num<em>warmup</em>steps=500)</code></td>
+</tr>
+<tr>
+<td style="text-align:left"><strong>梯度裁剪</strong></td>
+<td style="text-align:left">默认 (10.0)</td>
+</tr>
+</tbody></table>
+
+<hr>
+
+<h2 id="10-推理流程">10. 推理流程</h2>
+
+<pre><code>输入: 最近 n_obs_steps=2 帧的观察 (从队列堆叠)
+
+1. 图像预处理 (每帧每个相机):
+   Resize(144,192) → Crop → ResNet(GroupNorm) → SpatialSoftmax(32 kp) → Linear(64)
+   → 每个相机输出 (B, 64)，所有相机+时间步拼接
+
+2. 状态: 直接拼接 (B, n_obs_steps, state_dim) = (B, 2, 6)
+
+3. 触觉: TactileTokenEncoder → flatten → (B, n_obs_steps, n_chunks*feat_dim)
+
+4. 全局条件: concat([图像特征, 状态, 触觉]) → flatten → (B, cond_dim)
+
+5. DDPM 去噪循环 (默认 100 步):
+   for t from 100 down to 1:
+       noise_pred = UNet(noisy_actions, t_embedding(128), global_cond)
+       noisy_actions = scheduler.step(noise_pred, t, noisy_actions).prev_sample
+
+6. 从 horizon=16 步中截取第 2~9 步 (n_obs_steps-1 ~ n_obs_steps-1+n_action_steps)
+
+7. 动作入队 (长度=n_action_steps)，逐步执行</code></pre>
+
+<p><strong>推理特点</strong>：</p>
+<ul>
+<li><strong>速度较慢</strong>：需要 100 步迭代去噪（DDIM 可减少到 ~10 步以加速）</li>
+<li><strong>中间频率推理</strong>：每 <code>n<em>action</em>steps=8</code> 步推理一次</li>
+<li><strong>多峰能力</strong>：扩散模型天然支持多峰动作分布（如&quot;从左绕&quot;或&quot;从右绕&quot;）</li>
+<li><strong>跨 chunk 衔接</strong>：通过队列机制平滑过渡，但 chunk 间可能有微小不连续</li>
+</ul>
+
+<hr>
+
+<h2 id="11-diffusion-policy-网络架构图">11. Diffusion Policy 网络架构图</h2>
+
+<pre><code>┌─────────────────────────────────────────────────────────────────────────────┐
+│                     Diffusion Policy — Training Pipeline                     │
+│                                                                             │
+│  输入: (B, n_obs_steps=2, ...) 多步观察                                     │
+│                                                                             │
+│  ┌─────────────────────────────────────────────────────────────────────┐    │
+│  │                    全局条件编码 (Global Conditioning)                 │    │
+│  │                                                                     │    │
+│  │  ┌──────────────┐   ┌──────────────┐   ┌──────────────────┐        │    │
+│  │  │ Camera 0-N   │   │ Robot State  │   │  Tactile Sensor  │        │    │
+│  │  │ (3,H,W) ×N   │   │   (6,)       │   │   (12, 32)       │        │    │
+│  │  └──────┬───────┘   └──────┬───────┘   └────────┬─────────┘        │    │
+│  │         │                  │                     │                  │    │
+│  │         ▼                  ▼                     ▼                  │    │
+│  │  ┌──────────────────┐  (直接使用)    ┌──────────────────────┐       │    │
+│  │  │ DiffusionRgbEnc  │                │ TactileTokenEncoder  │       │    │
+│  │  │                  │                │  CNN Backbone        │       │    │
+│  │  │ Resize→Crop→     │                │  Conv→BN→ReLU→Pool  │       │    │
+│  │  │ ResNet(GroupNorm)│                │  FC(512)→Drop→FC(64)│       │    │
+│  │  │ →SpatialSoftmax  │                └──────────┬───────────┘       │    │
+│  │  │  (32kp, 64dim)   │                           │                   │    │
+│  │  └────────┬─────────┘                           │                   │    │
+│  │           │                                     │                   │    │
+│  │           ▼                                     ▼                   │    │
+│  │  (B, n_obs, 64×N)                    (B, n_obs, 1×64)              │    │
+│  │           │                                     │                   │    │
+│  │           └──────────────┬──────────────────────┘                   │    │
+│  │                          │                                          │    │
+│  │                          ▼                                          │    │
+│  │           concat([img_feats, state, tactile])                       │    │
+│  │           → flatten → (B, (6+64×N+64)×n_obs)                       │    │
+│  └──────────────────────────┬──────────────────────────────────────────┘    │
+│                             │ global_cond                                    │
+│                             ▼                                                │
+│  ┌─────────────────────────────────────────────────────────────────────┐    │
+│  │                    扩散去噪训练                                      │    │
+│  │                                                                     │    │
+│  │  动作轨迹 x_0: (B, horizon=16, action_dim=6)                        │    │
+│  │       │                                                             │    │
+│  │       ├── ε ~ N(0,I)    随机噪声                                     │    │
+│  │       ├── t ~ Uniform(0,100)    随机扩散步                           │    │
+│  │       └── x_t = √ᾱ_t·x_0 + √(1-ᾱ_t)·ε    前向加噪                  │    │
+│  │                              │                                      │    │
+│  │                              ▼                                      │    │
+│  │  ┌───────────────────────────────────────────────────────┐          │    │
+│  │  │  DiffusionConditionalUnet1d                           │          │    │
+│  │  │                                                       │          │    │
+│  │  │  Time Emb: SinusoidalPosEmb(t) → Linear→Mish→Linear   │          │    │
+│  │  │           → (B, 128)                                   │          │    │
+│  │  │                                                       │          │    │
+│  │  │  FiLM cond = concat([time_emb, global_cond])          │          │    │
+│  │  │           → Linear → Mish → Linear → (scale, bias)    │          │    │
+│  │  │                                                       │          │    │
+│  │  │  ┌─────────────────────────────────────────────┐      │          │    │
+│  │  │  │  编码器: 3级下采样 (stride=2)               │      │          │    │
+│  │  │  │  (6,16) → (512,8) → (1024,4) → (2048,2)   │      │          │    │
+│  │  │  │  每级: Conv1d→FiLM→Conv1d→FiLM→Downsample  │      │          │    │
+│  │  │  └─────────────────────────────────────────────┘      │          │    │
+│  │  │                       │                               │          │    │
+│  │  │  ┌─────────────────────▼───────────────────────┐      │          │    │
+│  │  │  │  瓶颈: 2× ResidualBlock → (2048, 2)         │      │          │    │
+│  │  │  └─────────────────────┬───────────────────────┘      │          │    │
+│  │  │                       │                               │          │    │
+│  │  │  ┌─────────────────────▼───────────────────────┐      │          │    │
+│  │  │  │  解码器: 3级上采样 + skip connections       │      │          │    │
+│  │  │  │  (2048,2)→(1024,4)→(512,8)→(6,16)          │      │          │    │
+│  │  │  │  Upsample→Conv1d→FiLM→Conv1d→FiLM           │      │          │    │
+│  │  │  └─────────────────────────────────────────────┘      │          │    │
+│  │  │                       │                               │          │    │
+│  │  │                       ▼                               │          │    │
+│  │  │              Final Conv1d(1×1)                        │          │    │
+│  │  │              → pred: (B, 16, 6)                       │          │    │
+│  │  └───────────────────────────────────────────────────────┘          │    │
+│  │                                                                     │    │
+│  │  Loss = MSE(pred, ε)   (当 prediction_type=&quot;epsilon&quot;)              │    │
+│  └─────────────────────────────────────────────────────────────────────┘    │
+│                                                                             │
+│  ═══════════════════════════════════════════════════════════════════════    │
+│                          Inference (推理)                                   │
+│  ═══════════════════════════════════════════════════════════════════════    │
+│                                                                             │
+│  编码 global_cond (同上)                                                     │
+│       │                                                                     │
+│       ▼                                                                     │
+│  sample = randn(B, 16, 6)    纯噪声起点                                     │
+│       │                                                                     │
+│       ▼                                                                     │
+│  for t in reversed(timesteps):        # 100步 → 1步 (DDPM)                 │
+│      noise_pred = UNet(sample, t_emb, global_cond)                          │
+│      sample = scheduler.step(noise_pred, t, sample).prev_sample             │
+│       │                                                                     │
+│       ▼                                                                     │
+│  actions = sample[:, 1:9, :]          # 截取 n_action_steps=8               │
+│       │                                                                     │
+│       ▼                                                                     │
+│  入队 → 逐步弹出执行                                                         │
+└─────────────────────────────────────────────────────────────────────────────┘</code></pre>
+
+<hr>
+
+<h2 id="附录关键文件索引">附录：关键文件索引</h2>
+
+<table>
+<thead><tr>
+<th style="text-align:left">组件</th>
+<th style="text-align:left">文件</th>
+</tr></thead>
+<tbody>
+<tr>
+<td style="text-align:left">DiffusionConfig</td>
+<td style="text-align:left"><code>src/lerobot/policies/diffusion/configuration_diffusion.py</code></td>
+</tr>
+<tr>
+<td style="text-align:left">DiffusionPolicy</td>
+<td style="text-align:left"><code>src/lerobot/policies/diffusion/modeling_diffusion.py:48</code></td>
+</tr>
+<tr>
+<td style="text-align:left">DiffusionModel</td>
+<td style="text-align:left"><code>src/lerobot/policies/diffusion/modeling_diffusion.py:173</code></td>
+</tr>
+<tr>
+<td style="text-align:left">DiffusionRgbEncoder</td>
+<td style="text-align:left"><code>src/lerobot/policies/diffusion/modeling_diffusion.py:487</code></td>
+</tr>
+<tr>
+<td style="text-align:left">SpatialSoftmax</td>
+<td style="text-align:left"><code>src/lerobot/policies/diffusion/modeling_diffusion.py:416</code></td>
+</tr>
+<tr>
+<td style="text-align:left">DiffusionConditionalUnet1d</td>
+<td style="text-align:left"><code>src/lerobot/policies/diffusion/modeling_diffusion.py</code> (~550+)</td>
+</tr>
+<tr>
+<td style="text-align:left">TactileTokenEncoder</td>
+<td style="text-align:left"><code>src/lerobot/policies/tactile/encoder.py:115</code></td>
+</tr>
+<tr>
+<td style="text-align:left">TactileCNN</td>
+<td style="text-align:left"><code>src/lerobot/policies/tactile/encoder.py:27</code></td>
+</tr>
+<tr>
+<td style="text-align:left">TactileAttentionCNN</td>
+<td style="text-align:left"><code>src/lerobot/policies/tactile/encoder.py:65</code></td>
+</tr>
+<tr>
+<td style="text-align:left">PreTrainedPolicy</td>
+<td style="text-align:left"><code>src/lerobot/policies/pretrained.py</code></td>
+</tr>
+<tr>
+<td style="text-align:left">PreTrainedConfig</td>
+<td style="text-align:left"><code>src/lerobot/configs/policies.py</code></td>
+</tr>
+<tr>
+<td style="text-align:left">populate_queues</td>
+<td style="text-align:left"><code>src/lerobot/policies/utils.py</code></td>
+</tr>
+<tr>
+<td style="text-align:left">EpisodeAwareSampler</td>
+<td style="text-align:left"><code>src/lerobot/datasets/sampler.py</code></td>
+</tr>
+</tbody></table>
+
+</body>
+</html>
