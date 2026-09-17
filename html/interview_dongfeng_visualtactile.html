@@ -101,6 +101,19 @@ strong { font-weight: 600; }
 <h4 id="q20提到-sim2real你的项目有仿真到真机的迁移问题吗">Q20：提到 Sim2Real，你的项目有仿真到真机的迁移问题吗？</h4>
 <blockquote><p>我主要是<strong>真机 + 真数据</strong>，不是"仿真训练→真机部署"，所以<strong>避免了经典的 Sim2Real gap</strong>（仿真接触力学不准）。但反过来，真机数据<strong>采集成本高</strong>，这是 trade-off。如果后面要规模化，可以考虑<strong>仿真采触觉数据 + 域随机化</strong>做 Sim2Real，这也是我下一步想探索的方向。</p></blockquote>
 <hr>
+<h3 id="e-训练流程与策略输入输出">E+ · 训练流程与策略输入输出（云端/硬件分工 · 训练方法 · ACT/DP 输入输出）</h3>
+<blockquote><p>本节补三个面试高频问题：你是在云端还是硬件上干活、模型怎么训练、策略到底"吃什么吐什么"。答清楚这三条，能证明你<strong>不是只会调包，而是真跑过完整闭环</strong>。</p></blockquote>
+<h4 id="qe1对于机械臂这个项目你的主要工作是在云端还是硬件上">QE1：对于机械臂这个项目，你的主要工作是在云端还是硬件上？</h4>
+<blockquote><p><strong>两头都有，是个"本地硬件采数据 → 云端训模型 → 本地硬件部署评估"的闭环</strong>。</p>
+<ul><li><strong>硬件端（本地主机 + 真机）</strong>：用 <strong>SO-101 机械臂 + 自制 FlexiTac 触觉 + 双 RGB 相机</strong>做<strong>遥操作采示教数据</strong>（<code>lerobot-teleoperate</code> / <code>lerobot-record</code>）、<strong>传感器标定</strong>、<strong>真机评估/回放</strong>（挂 policy 跑闭环 <code>lerobot-record</code>、<code>lerobot-replay</code>）。</li><li><strong>云端</strong>：把本地采好的数据集 <strong>scp 传到云端 GPU 集群</strong>（Slurm 提交 <code>sbatch</code>，4090/5090 卡），跑 <code>lerobot-train</code> 训 ACT / Diffusion Policy，训完把 checkpoint <strong>scp 回本地</strong>部署。</li></ul>
+<p>概括：<strong>科研工作量大头在硬件侧</strong>（数据、标定、评估这些"碰真机"的活），训练在云端只是<strong>跑脚本 + 调超参</strong>。所以"云端还是硬件"我都能讲透，不是只会云端调参。</p></blockquote>
+<h4 id="qe2模型训练具体是怎么做的这个学习策略是视觉类还是控制类">QE2：模型训练具体是怎么做的？这个学习策略是"视觉类"还是"控制类"？</h4>
+<blockquote><p>训练方式是<strong>模仿学习 / 行为克隆（Behavior Cloning）</strong>，本质是<strong>监督学习</strong>：人操作 leader 臂遥操作，follower 把"<strong>观测 → 动作</strong>"成对录成示教数据，训练时让策略学"给定观测，输出与示教一致的动作"。</p>
+<ul><li><strong>ACT 的损失</strong>：动作的 <strong>L1 重建损失</strong> + VAE 的 <strong>KL 散度</strong>；</li><li><strong>Diffusion Policy 的损失</strong>：<strong>扩散去噪损失</strong>（MSE 预测噪声）。</li></ul>
+<p>是"视觉类"还是"控制类"？——<strong>两个都算，标准叫法是"视觉-运动策略（visuomotor policy）"，端到端</strong>：<strong>输入端是视觉</strong>（相机图像）+ 触觉 + 本体状态，<strong>输出端直接是控制指令</strong>（关节目标位置）。它<strong>不是纯视觉感知</strong>（不做检测/分割），也<strong>不是传统控制</strong>（不做动力学建模 + 手工调参），而是<strong>从像素/触觉直接映射到控制动作</strong>。真正的底层伺服（PID 位置环）在<strong>舵机内部</strong>完成，学习策略只输出"<strong>目标位置</strong>"。</p></blockquote>
+<h4 id="qe3act--diffusion-policy-的输入和输出分别是什么输出的动作包含哪些信号指令">QE3：ACT / Diffusion Policy 的输入和输出分别是什么？输出的动作包含哪些信号/指令？</h4>
+<blockquote><ul><li><strong>输入（观测）</strong>：① <strong>多视角 RGB 图像</strong>——本项目 <strong>front 前视 + side 侧视两路相机</strong>（640×480），经 <strong>ResNet18</strong> 编码；② <strong>本体状态 proprioception</strong>——当前 <strong>6 个电机位置</strong>（5 个机械臂关节 + 1 个夹爪）；③ <strong>（触觉版）触觉热图</strong>——FlexiTac <strong>12×32 = 384 taxel</strong>；④ 若干<strong>历史观测帧</strong>（<code>n_obs_steps</code>）。</li><li><strong>输出（动作）</strong>：一个<strong>动作块（action chunk）</strong>——未来若干步（<code>chunk_size</code>/horizon，如 16~100 步）的关节目标位置序列，<strong>每一步 6 维</strong>。</li><li><strong>这 6 维动作到底是什么（关键，要讲准）</strong>：是 <strong>6 个舵机的"目标位置指令"</strong>，即 <code>[shoulder_pan, shoulder_lift, elbow_flex, wrist_flex, wrist_roll, gripper]</code> 的目标角度（单位：度）。<strong>不是</strong>末端笛卡尔位姿 (x,y,z,rx,ry,rz)、<strong>不是</strong>力矩/电流、<strong>也不是</strong>夹持力。</li><li><strong>下发指令类型</strong>：位置指令，直接写进 <strong>Feetech STS3215 舵机的 Goal_Position</strong>，舵机内部自带 <strong>PID 位置环</strong>执行。</li><li><strong>主动澄清一点（统一口径）</strong>：<strong>夹爪输出的也是"位置"（开合度 0~100%），不是力</strong>，所以"夹持力闭环"必须靠<strong>外环</strong>（触觉 → 力估计 → 开合度增量）——这正是我做<strong>分层架构</strong>的根本原因（呼应 Q12）。文档前面说"输出末端位姿"是简化说法，面试若被追问就按这个口径纠正：<strong>策略输出的是关节空间的目标角度（6 维），不是笛卡尔位姿</strong>。</li></ul></blockquote>
+<hr>
 <h3 id="f-触觉传感器原理--力标定对标-jd-第-3-条">F. 触觉传感器原理 + 力标定（对标 JD 第 3 条）</h3>
 <h4 id="q21你的-flexitac-传感器是什么原理">Q21：你的 FlexiTac 传感器是什么原理？</h4>
 <blockquote><p><strong>压阻式（piezoresistive）</strong>：用 <strong>Velostat 压阻材料</strong>，受压时电阻变化，<strong>Arduino 的 ADC</strong> 采集模拟信号，转成 <strong>12×32=384 个 taxel（触觉单元）</strong> 的灰度图，采样率约 <strong>100Hz</strong>。相比 GelSight 的<strong>视觉式</strong>（相机拍形变），压阻式<strong>便宜、轻、能直接上夹爪</strong>，适合<strong>自制</strong>。</p></blockquote>
